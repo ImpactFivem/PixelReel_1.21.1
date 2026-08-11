@@ -242,7 +242,7 @@ public final class PlexClient {
 		}
 		String path = thumbPath.startsWith("http") ? thumbPath : (this.baseUrl + thumbPath);
 		String separator = path.contains("?") ? "&" : "?";
-		return path + separator + "X-Plex-Token=" + enc(this.token) + "&width=400&height=600";
+		return path + separator + "X-Plex-Token=" + enc(this.token) + "&width=600&height=900&minSize=1";
 	}
 
 	private List<JellyfinItemSummary> parseMetadataList(JsonObject root) {

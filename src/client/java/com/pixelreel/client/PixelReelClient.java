@@ -44,6 +44,7 @@ public class PixelReelClient implements ClientModInitializer {
 
 		ClientTickEvents.END_CLIENT_TICK.register(minecraft -> {
 			PlaybackManager.INSTANCE.clientTick();
+			PosterCache.INSTANCE.clientTick();
 			tickAutoplayPrompt(minecraft);
 		});
 

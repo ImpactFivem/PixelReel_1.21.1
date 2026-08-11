@@ -5,6 +5,7 @@ import com.pixelreel.client.ClientMediaCache;
 import com.pixelreel.client.ClientNetworking;
 import com.pixelreel.client.gui.GuiColors;
 import com.pixelreel.client.gui.MediaSourceScreen;
+import com.pixelreel.client.texture.PosterCache;
 import com.pixelreel.jellyfin.JellyfinItemKind;
 import com.pixelreel.jellyfin.JellyfinItemSummary;
 import com.pixelreel.jellyfin.JellyfinStatus;
@@ -23,6 +24,7 @@ public class OnDemandBrowseScreen extends Screen {
 	private static final int HEADER_HEIGHT = 52;
 	private static final int FOOTER_HEIGHT = 48;
 	private static final int CARD_GAP = 8;
+	private static final int SEARCH_DEBOUNCE_TICKS = 12;
 		private final DisplayBlockEntity display;
 	private final ModNetworkPayloads.BrowseKind kind;
 	private final OnDemandProvider provider;
@@ -34,6 +36,8 @@ public class OnDemandBrowseScreen extends Screen {
 	private double scroll;
 	private int page;
 	private boolean requested;
+	private boolean loadingPage;
+	private int searchDebounce;
 
 	public OnDemandBrowseScreen(DisplayBlockEntity display, ModNetworkPayloads.BrowseKind kind, OnDemandProvider provider) {
 		super(Component.translatable(
@@ -61,7 +65,7 @@ public class OnDemandBrowseScreen extends Screen {
 		this.searchBox.setResponder(value -> {
 			this.page = 0;
 			this.scroll = 0;
-			this.request(false);
+			this.searchDebounce = SEARCH_DEBOUNCE_TICKS;
 		});
 		this.addRenderableWidget(this.searchBox);
 		this.addRenderableWidget(
@@ -110,6 +114,11 @@ public class OnDemandBrowseScreen extends Screen {
 
 	private void request(boolean force) {
 		this.requested = true;
+		this.loadingPage = true;
+		this.searchDebounce = 0;
+		this.clearCards();
+		ClientMediaCache.INSTANCE.beginBrowse();
+		PosterCache.INSTANCE.clearPage();
 		String search = this.searchBox == null ? "" : this.searchBox.getValue();
 		ClientNetworking.requestJellyfinBrowse(this.provider, this.kind, search, this.page, force);
 	}
@@ -119,10 +128,18 @@ public class OnDemandBrowseScreen extends Screen {
 			|| ClientMediaCache.INSTANCE.browseProvider() != this.provider) {
 			return;
 		}
+		this.loadingPage = false;
 		this.page = ClientMediaCache.INSTANCE.browsePage();
 		this.rebuildCards();
 		this.clampScroll();
 		this.rebuildFooter();
+	}
+
+	private void clearCards() {
+		for (OnDemandPosterCard card : this.cards) {
+			this.removeWidget(card);
+		}
+		this.cards.clear();
 	}
 
 	private void reflow() {
@@ -133,10 +150,7 @@ public class OnDemandBrowseScreen extends Screen {
 	}
 
 	private void rebuildCards() {
-		for (OnDemandPosterCard card : this.cards) {
-			this.removeWidget(card);
-		}
-		this.cards.clear();
+		this.clearCards();
 		List<JellyfinItemSummary> items = ClientMediaCache.INSTANCE.browseItems();
 		for (int i = 0; i < items.size(); i++) {
 			JellyfinItemSummary item = items.get(i);
@@ -184,7 +198,7 @@ public class OnDemandBrowseScreen extends Screen {
 		JellyfinStatus status = ClientMediaCache.INSTANCE.browseStatus();
 		Component line;
 		int color = GuiColors.TEXT_DIM;
-		if (!this.requested) {
+		if (!this.requested || this.loadingPage) {
 			line = Component.translatable("gui.pixelreel.menu.loading");
 		} else if (!status.configured()) {
 			line = Component.translatable("gui.pixelreel.source.ondemand_not_configured", this.provider.displayName());
@@ -234,6 +248,9 @@ public class OnDemandBrowseScreen extends Screen {
 	@Override
 	public void tick() {
 		super.tick();
+		if (this.searchDebounce > 0 && --this.searchDebounce == 0) {
+			this.request(false);
+		}
 		if (this.display.isRemoved()) {
 			this.onClose();
 		}

@@ -62,6 +62,10 @@ public final class ClientMediaCache {
 		);
 	}
 
+	public void beginBrowse() {
+		this.browseItems = List.of();
+	}
+
 	public void acceptBrowse(ModNetworkPayloads.JellyfinBrowseResult payload) {
 		this.browseProvider = payload.provider();
 		this.browseKind = payload.kind();

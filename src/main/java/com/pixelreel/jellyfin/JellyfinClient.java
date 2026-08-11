@@ -542,7 +542,7 @@ public final class JellyfinClient {
 		if (itemId == null || itemId.isBlank() || this.connection.baseUrl().isBlank()) {
 			return "";
 		}
-		return this.base() + "/Items/" + pathSeg(itemId) + "/Images/Primary?maxHeight=400&quality=90&api_key=" + enc(this.connection.apiKey());
+		return this.base() + "/Items/" + pathSeg(itemId) + "/Images/Primary?maxHeight=900&quality=96&api_key=" + enc(this.connection.apiKey());
 	}
 
 	private String buildStreamUrl(
