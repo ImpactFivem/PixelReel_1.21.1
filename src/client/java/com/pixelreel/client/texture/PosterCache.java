@@ -4,6 +4,7 @@ import com.mojang.blaze3d.platform.NativeImage;
 import com.pixelreel.PixelReel;
 import com.pixelreel.channels.Channel;
 import com.pixelreel.channels.ChannelEntry;
+import com.pixelreel.client.playback.video.NativeImageAccess;
 import com.pixelreel.config.ConfigManager;
 import com.pixelreel.config.PixelReelConfig;
 import java.awt.Graphics2D;
@@ -11,7 +12,6 @@ import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.http.HttpClient;
@@ -53,7 +53,7 @@ public final class PosterCache {
 	private static final int MAX_ENTRIES = 96;
 	private static final long MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 	private static final int MAX_DIMENSION = 1024;
-	private static final int UPLOADS_PER_TICK = 2;
+	private static final int UPLOADS_PER_TICK = 6;
 	private static final long FAILURE_RETRY_MILLIS = 30_000L;
 	private static final Set<String> BROKEN_HOSTS = Set.of("localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]");
 	private static final String LOGO_KEY_PREFIX = "chlogo:";
@@ -87,7 +87,6 @@ public final class PosterCache {
 	private final ConcurrentLinkedQueue<Runnable> uploadQueue = new ConcurrentLinkedQueue<>();
 	private final AtomicLong generation = new AtomicLong();
 	private volatile @Nullable HttpClient httpClient;
-	private @Nullable Field nativeImagePixelsField;
 
 	private PosterCache() {
 	}
@@ -283,20 +282,16 @@ public final class PosterCache {
 					if (bytes == null) {
 						continue;
 					}
+					// Decode on the worker only. NativeImage / GL upload must happen on the client tick.
 					PreparedPixels prepared = preparePixels(bytes);
 					if (prepared == null || !this.isCurrent(key, entry)) {
 						continue;
-					}
-					NativeImage image = toNativeImage(prepared);
-					if (!this.isCurrent(key, entry)) {
-						image.close();
-						return;
 					}
 					String source = switch (candidate) {
 						case Candidate.LocalFile localFile -> localFile.path().toString();
 						case Candidate.Remote remote -> remote.url();
 					};
-					this.uploadQueue.offer(() -> this.installNative(key, entry, image, source));
+					this.uploadQueue.offer(() -> this.installPrepared(key, entry, prepared, source));
 					return;
 				} catch (Throwable t) {
 					PixelReel.LOGGER.warn("Channel thumbnail candidate failed for {} ({}): {}", key, candidate, t.toString());
@@ -364,7 +359,7 @@ public final class PosterCache {
 		NativeImage image = new NativeImage(prepared.width(), prepared.height(), false);
 		int[] argb = prepared.argb();
 		try {
-			long base = this.nativeImagePointer(image);
+			long base = NativeImageAccess.pointer(image);
 			for (int i = 0; i < argb.length; i++) {
 				MemoryUtil.memPutInt(base + (long) i * 4L, argbToNative(argb[i]));
 			}
@@ -380,17 +375,39 @@ public final class PosterCache {
 		return image;
 	}
 
-	private long nativeImagePointer(NativeImage image) {
+	private void installPrepared(String key, Entry entry, PreparedPixels prepared, String source) {
+		if (!this.isCurrent(key, entry)) {
+			return;
+		}
+		NativeImage image = null;
 		try {
-			Field field = this.nativeImagePixelsField;
-			if (field == null) {
-				field = NativeImage.class.getDeclaredField("pixels");
-				field.setAccessible(true);
-				this.nativeImagePixelsField = field;
+			image = toNativeImage(prepared);
+			if (!this.isCurrent(key, entry)) {
+				image.close();
+				return;
 			}
-			return field.getLong(image);
-		} catch (ReflectiveOperationException e) {
-			throw new IllegalStateException("Unable to access NativeImage pixel pointer", e);
+			int width = image.getWidth();
+			int height = image.getHeight();
+			DynamicTexture texture = new DynamicTexture(image);
+			image = null;
+			texture.setFilter(true, false);
+			texture.upload();
+			ResourceLocation id = Minecraft.getInstance().getTextureManager()
+				.register("pixelreel_poster", texture);
+			entry.textureId = id;
+			entry.width = width;
+			entry.height = height;
+			entry.state = State.READY;
+			PixelReel.LOGGER.debug("Loaded channel thumbnail for {} from {} -> {}", key, source, id);
+		} catch (Exception e) {
+			if (image != null) {
+				image.close();
+			}
+			if (this.isCurrent(key, entry)) {
+				entry.state = State.FALLBACK;
+				entry.failedAt = System.currentTimeMillis();
+				PixelReel.LOGGER.warn("Could not upload channel artwork for {} from {}", key, source, e);
+			}
 		}
 	}
 
@@ -494,34 +511,6 @@ public final class PosterCache {
 		}
 	}
 
-	private void installNative(String key, Entry entry, NativeImage image, String source) {
-		if (!this.isCurrent(key, entry)) {
-			image.close();
-			return;
-		}
-		try {
-			int width = image.getWidth();
-			int height = image.getHeight();
-			DynamicTexture texture = new DynamicTexture(image);
-			texture.setFilter(true, false);
-			texture.upload();
-			ResourceLocation id = Minecraft.getInstance().getTextureManager()
-				.register("pixelreel_poster", texture);
-			entry.textureId = id;
-			entry.width = width;
-			entry.height = height;
-			entry.state = State.READY;
-			PixelReel.LOGGER.debug("Loaded channel thumbnail for {} from {} -> {}", key, source, id);
-		} catch (Exception e) {
-			image.close();
-			if (this.isCurrent(key, entry)) {
-				entry.state = State.FALLBACK;
-				entry.failedAt = System.currentTimeMillis();
-				PixelReel.LOGGER.warn("Could not upload channel artwork for {} from {}", key, source, e);
-			}
-		}
-	}
-
 	public void clientTick() {
 		int budget = UPLOADS_PER_TICK;
 		Runnable task;
@@ -530,12 +519,13 @@ public final class PosterCache {
 		}
 	}
 
+	/**
+	 * Drop on-demand poster textures for the previous browse page.
+	 * Channel logos are kept. In-flight loads for the old page are cancelled.
+	 */
 	public void clearPage() {
 		this.generation.incrementAndGet();
-		Runnable task;
-		while ((task = this.uploadQueue.poll()) != null) {
-			task.run();
-		}
+		this.uploadQueue.clear();
 		Iterator<Map.Entry<String, Entry>> iterator = this.entries.entrySet().iterator();
 		while (iterator.hasNext()) {
 			Map.Entry<String, Entry> mapEntry = iterator.next();
@@ -591,10 +581,7 @@ public final class PosterCache {
 
 	public void clear() {
 		this.generation.incrementAndGet();
-		Runnable task;
-		while ((task = this.uploadQueue.poll()) != null) {
-			task.run();
-		}
+		this.uploadQueue.clear();
 		this.entries.values().forEach(PosterCache::releaseTexture);
 		this.entries.clear();
 		this.order.clear();

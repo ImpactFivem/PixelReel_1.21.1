@@ -12,6 +12,7 @@ repositories {
 }
 
 loom {
+	accessWidenerPath = file("src/main/resources/pixelreel.accesswidener")
 	splitEnvironmentSourceSets()
 
 	mods {

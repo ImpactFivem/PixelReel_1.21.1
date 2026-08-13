@@ -38,6 +38,7 @@ public class OnDemandBrowseScreen extends Screen {
 	private boolean requested;
 	private boolean loadingPage;
 	private int searchDebounce;
+	private String lastRequestedSearch = "";
 
 	public OnDemandBrowseScreen(DisplayBlockEntity display, ModNetworkPayloads.BrowseKind kind, OnDemandProvider provider) {
 		super(Component.translatable(
@@ -63,6 +64,10 @@ public class OnDemandBrowseScreen extends Screen {
 		this.searchBox = new EditBox(this.font, centre - 120, 28, 180, 18, Component.translatable("gui.pixelreel.jellyfin.search"));
 		this.searchBox.setMaxLength(64);
 		this.searchBox.setResponder(value -> {
+			String next = value == null ? "" : value;
+			if (next.equals(this.lastRequestedSearch) && this.searchDebounce == 0) {
+				return;
+			}
 			this.page = 0;
 			this.scroll = 0;
 			this.searchDebounce = SEARCH_DEBOUNCE_TICKS;
@@ -118,9 +123,10 @@ public class OnDemandBrowseScreen extends Screen {
 		this.searchDebounce = 0;
 		this.clearCards();
 		ClientMediaCache.INSTANCE.beginBrowse();
-		PosterCache.INSTANCE.clearPage();
 		String search = this.searchBox == null ? "" : this.searchBox.getValue();
-		ClientNetworking.requestJellyfinBrowse(this.provider, this.kind, search, this.page, force);
+		this.lastRequestedSearch = search == null ? "" : search;
+		// Clear previous page posters only when the new page payload arrives.
+		ClientNetworking.requestJellyfinBrowse(this.provider, this.kind, this.lastRequestedSearch, this.page, force);
 	}
 
 	public void onBrowseUpdated() {
@@ -130,6 +136,7 @@ public class OnDemandBrowseScreen extends Screen {
 		}
 		this.loadingPage = false;
 		this.page = ClientMediaCache.INSTANCE.browsePage();
+		PosterCache.INSTANCE.clearPage();
 		this.rebuildCards();
 		this.clampScroll();
 		this.rebuildFooter();
@@ -159,6 +166,8 @@ public class OnDemandBrowseScreen extends Screen {
 			OnDemandPosterCard card = new OnDemandPosterCard(cardX, cardY, item, this::openItem);
 			this.cards.add(card);
 			this.addRenderableWidget(card);
+			// Prefetch this page immediately so off-screen cards still warm the cache.
+			PosterCache.INSTANCE.getByUrl(item.id(), item.imageUrl());
 		}
 		this.applyCardVisibility();
 	}

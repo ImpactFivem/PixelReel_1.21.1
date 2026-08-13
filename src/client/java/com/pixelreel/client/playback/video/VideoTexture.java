@@ -3,7 +3,6 @@ package com.pixelreel.client.playback.video;
 import com.mojang.blaze3d.platform.NativeImage;
 import com.pixelreel.PixelReel;
 import com.pixelreel.client.playback.subtitle.SubtitleRasterizer;
-import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.DynamicTexture;
@@ -117,6 +116,11 @@ public final class VideoTexture implements AutoCloseable {
 		int bytes = width * height * 4;
 		synchronized (this.lock) {
 			if (this.closed) {
+				return;
+			}
+			// Drop frames while the previous one is still waiting for GPU upload.
+			// Stops VLC decode from piling copies / HDR / subtitle work onto native memory.
+			if (this.dirty && this.staging != null && this.stagingWidth == width && this.stagingHeight == height) {
 				return;
 			}
 			if (this.staging == null || this.stagingWidth != width || this.stagingHeight != height) {
@@ -236,6 +240,9 @@ public final class VideoTexture implements AutoCloseable {
 
 		DynamicTexture current = this.texture;
 		NativeImage image = current.getPixels();
+		if (image == null) {
+			return false;
+		}
 		synchronized (this.lock) {
 			if (this.closed || this.staging == null) {
 				return true;
@@ -243,21 +250,21 @@ public final class VideoTexture implements AutoCloseable {
 			if (!this.dirty) {
 				return true;
 			}
-			MemoryUtil.memCopy(MemoryUtil.memAddress(this.staging), nativeImagePointer(image), (long)width * height * 4L);
+			try {
+				MemoryUtil.memCopy(
+					MemoryUtil.memAddress(this.staging),
+					NativeImageAccess.pointer(image),
+					(long)width * height * 4L
+				);
+			} catch (Throwable t) {
+				PixelReel.LOGGER.error("Failed to copy video frame into NativeImage", t);
+				this.dirty = false;
+				return false;
+			}
 			this.dirty = false;
 		}
 		current.upload();
 		return true;
-	}
-
-	private static long nativeImagePointer(NativeImage image) {
-		try {
-			Field field = NativeImage.class.getDeclaredField("pixels");
-			field.setAccessible(true);
-			return field.getLong(image);
-		} catch (ReflectiveOperationException e) {
-			throw new IllegalStateException("Unable to access NativeImage pixel pointer", e);
-		}
 	}
 
 	private void recreate(int width, int height) {

@@ -18,7 +18,6 @@ import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.BaseEntityBlock;
 import net.minecraft.world.level.block.Block;
-import net.minecraft.world.level.block.HorizontalDirectionalBlock;
 import net.minecraft.world.level.block.Mirror;
 import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -37,7 +36,11 @@ import org.jetbrains.annotations.Nullable;
 
 /** this adds collision to the display i think this is needed imagine getting blown up my a creeper and the movie turns off lame */
 public class DisplayBlock extends BaseEntityBlock {
-	public static final EnumProperty<Direction> FACING = HorizontalDirectionalBlock.FACING;
+	public static final EnumProperty<Direction> FACING = EnumProperty.create(
+		"facing",
+		Direction.class,
+		Direction.Plane.HORIZONTAL
+	);
 	public static final BooleanProperty POWERED = BlockStateProperties.POWERED;
 
 	private final DisplayType type;

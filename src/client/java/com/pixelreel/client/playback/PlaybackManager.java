@@ -40,6 +40,7 @@ public final class PlaybackManager {
 	private final Set<String> endedReports = new HashSet<>();
 	private final Set<String> durationReports = new HashSet<>();
 	private int tickCounter;
+	private long audioRefreshUntilMs;
 
 	private PlaybackManager() {
 	}
@@ -187,19 +188,32 @@ public final class PlaybackManager {
 		}
 
 		float globalVolume = (float)config.globalTvVolume;
-		Iterator<Map.Entry<String, ChannelPlayer>> iterator = this.players.entrySet().iterator();
-		while (iterator.hasNext()) {
-			Map.Entry<String, ChannelPlayer> entry = iterator.next();
-			ChannelPlayer channelPlayer = entry.getValue();
+		boolean closedAny = false;
+		Iterator<Map.Entry<String, ChannelPlayer>> closer = this.players.entrySet().iterator();
+		while (closer.hasNext()) {
+			Map.Entry<String, ChannelPlayer> entry = closer.next();
 			List<Binding> bindings = desired.get(entry.getKey());
 			boolean active = allowed.contains(entry.getKey()) && bindings != null && !bindings.isEmpty();
-			if (!active) {
-				PixelReel.LOGGER.info("Stopping channel stream ({}) — out of range or switched away", host(entry.getKey()));
-				iterator.remove();
-				this.playerEpochs.remove(entry.getKey());
-				this.endedReports.remove(entry.getKey());
-				this.durationReports.remove(entry.getKey());
-				channelPlayer.close();
+			if (active) {
+				continue;
+			}
+			PixelReel.LOGGER.info("Stopping channel stream ({}) — out of range or switched away", host(entry.getKey()));
+			closer.remove();
+			this.playerEpochs.remove(entry.getKey());
+			this.endedReports.remove(entry.getKey());
+			this.durationReports.remove(entry.getKey());
+			entry.getValue().close();
+			closedAny = true;
+		}
+		if (closedAny) {
+			this.audioRefreshUntilMs = System.currentTimeMillis() + 750L;
+		}
+		boolean refreshAudio = closedAny || System.currentTimeMillis() < this.audioRefreshUntilMs;
+
+		for (Map.Entry<String, ChannelPlayer> entry : this.players.entrySet()) {
+			ChannelPlayer channelPlayer = entry.getValue();
+			List<Binding> bindings = desired.get(entry.getKey());
+			if (bindings == null || bindings.isEmpty()) {
 				continue;
 			}
 
@@ -236,12 +250,13 @@ public final class PlaybackManager {
 			}
 			boolean glasses = PixelGlassesItem.isWearing(player);
 			double distance = Math.sqrt(nearest.distanceSqr());
-			// Soft knee near the edge so gain does not slam to zero and mute-thrash.
-			// Cinema glasses listen at full screen volume (no distance falloff).
 			double normalized = glasses ? 1.0 : softDistanceGain(distance, audioRange);
 			float gain = (float)(volume * globalVolume * normalized);
 			if (display.isOnDemand() && display.isPlaybackPaused()) {
 				gain = 0.0F;
+			}
+			if (refreshAudio) {
+				channelPlayer.markVolumeDirty();
 			}
 			channelPlayer.tickAudio(gain);
 		}
