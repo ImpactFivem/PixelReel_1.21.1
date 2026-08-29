@@ -7,6 +7,7 @@ import com.pixelreel.client.playback.PlaybackManager;
 import com.pixelreel.client.playback.video.VlcRuntime;
 import com.pixelreel.client.render.DisplayBlockEntityRenderer;
 import com.pixelreel.client.render.GlassesOverlay;
+import com.pixelreel.client.render.WallPosterRenderer;
 import com.pixelreel.client.texture.PosterCache;
 import com.pixelreel.registry.ModBlockEntities;
 import net.fabricmc.api.ClientModInitializer;
@@ -28,6 +29,7 @@ public class PixelReelClient implements ClientModInitializer {
 		ClientNetworking.register();
 		GlassesControls.register();
 		BlockEntityRenderers.register(ModBlockEntities.DISPLAY, DisplayBlockEntityRenderer::new);
+		BlockEntityRenderers.register(ModBlockEntities.WALL_POSTER, WallPosterRenderer::new);
 		HudRenderCallback.EVENT.register(GlassesOverlay::render);
 
 		ClientBridge.setHandler(new ClientBridge.Handler() {
@@ -50,8 +52,11 @@ public class PixelReelClient implements ClientModInitializer {
 
 		ClientPlayConnectionEvents.DISCONNECT.register((handler, minecraft) -> {
 			PlaybackManager.INSTANCE.releaseAll();
+			PosterCache.INSTANCE.clear();
 			ClientChannelCache.INSTANCE.clear();
 			ClientMediaCache.INSTANCE.clear();
+			com.pixelreel.client.poster.CustomPosterClient.clear();
+			com.pixelreel.client.playback.ClientPlaybackSecrets.clear();
 		});
 
 		ClientLifecycleEvents.CLIENT_STOPPING.register(minecraft -> {

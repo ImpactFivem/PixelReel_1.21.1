@@ -2,6 +2,9 @@ package com.pixelreel.networking;
 
 import com.pixelreel.PixelReel;
 import com.pixelreel.blockentities.DisplayBlockEntity;
+import com.pixelreel.blockentities.WallPosterBlockEntity;
+import com.pixelreel.blocks.WallPosterBlock;
+import com.pixelreel.channels.Channel;
 import com.pixelreel.channels.ChannelEntry;
 import com.pixelreel.channels.ChannelService;
 import com.pixelreel.channels.LiveStatus;
@@ -13,10 +16,16 @@ import com.pixelreel.jellyfin.JellyfinItemSummary;
 import com.pixelreel.jellyfin.JellyfinLibrary;
 import com.pixelreel.jellyfin.JellyfinService;
 import com.pixelreel.jellyfin.JellyfinStatus;
+import com.pixelreel.media.MediaProxy;
 import com.pixelreel.ondemand.OnDemandCatalog;
 import com.pixelreel.ondemand.OnDemandProvider;
 import com.pixelreel.permissions.CinemaPermissions;
 import com.pixelreel.plex.PlexService;
+import com.pixelreel.poster.PosterArt;
+import com.pixelreel.poster.PosterImages;
+import com.pixelreel.poster.WatchingDisplays;
+import com.pixelreel.poster.CustomPosterStore;
+import com.pixelreel.poster.CustomPosterUploads;
 import com.pixelreel.server.ScreenControllerLogic;
 import java.util.ArrayList;
 import java.util.List;
@@ -24,9 +33,18 @@ import java.util.concurrent.CompletableFuture;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import org.jetbrains.annotations.Nullable;
 
 public final class ServerNetworking {
+	private static final double MAX_POSTER_DISTANCE_SQR =
+		ScreenControllerLogic.MAX_CONTROL_DISTANCE * ScreenControllerLogic.MAX_CONTROL_DISTANCE;
+	private static final long MIN_REPORTED_DURATION_MS = 5_000L;
+	private static final long MAX_REPORTED_DURATION_MS = 24L * 60L * 60L * 1000L;
+	/** Below this a "finished" claim is never believable, however long the client says the media is. */
+	private static final long MIN_ELAPSED_BEFORE_END_MS = 30_000L;
+
 	private ServerNetworking() {
 	}
 
@@ -83,6 +101,18 @@ public final class ServerNetworking {
 			ModNetworkPayloads.UpdateTunarrConfig.TYPE, (payload, context) -> handleUpdateTunarrConfig(payload, context.player())
 		);
 		ServerPlayNetworking.registerGlobalReceiver(
+			ModNetworkPayloads.SetPosterArtwork.TYPE, (payload, context) -> handleSetPosterArtwork(payload, context.player())
+		);
+		ServerPlayNetworking.registerGlobalReceiver(
+			ModNetworkPayloads.UploadPosterChunk.TYPE, (payload, context) -> CustomPosterUploads.handleChunk(payload, context.player())
+		);
+		ServerPlayNetworking.registerGlobalReceiver(
+			ModNetworkPayloads.RequestCustomPoster.TYPE, (payload, context) -> CustomPosterUploads.sendTo(context.player(), payload.id())
+		);
+		ServerPlayNetworking.registerGlobalReceiver(
+			ModNetworkPayloads.RequestPlaybackSecrets.TYPE, (payload, context) -> PlaybackSecrets.handleRequest(payload, context.player())
+		);
+		ServerPlayNetworking.registerGlobalReceiver(
 			ModNetworkPayloads.UnequipPixelGlasses.TYPE,
 			(payload, context) -> context.server().execute(() ->
 				com.pixelreel.items.PixelGlassesItem.tryUnequip(context.player())
@@ -96,8 +126,11 @@ public final class ServerNetworking {
 			PixelReel.LOGGER.debug("Rejected screen control from {} at {}: no reachable display", player.getName().getString(), payload.pos().toShortString());
 			return;
 		}
-		if (!mayControl(player, payload.action())) {
+		if (!CinemaPermissions.canPerform(player, payload.action())) {
 			notify(player, payload.pos(), ScreenControllerLogic.Outcome.NO_PERMISSION);
+			return;
+		}
+		if (payload.action() == ScreenAction.REPORT_DURATION && !acceptDurationReport(display, payload.value())) {
 			return;
 		}
 		ScreenControllerLogic.Outcome outcome = ScreenControllerLogic.apply(
@@ -106,17 +139,16 @@ public final class ServerNetworking {
 		notify(player, payload.pos(), outcome);
 	}
 
-	private static boolean mayControl(ServerPlayer player, ScreenAction action) {
-		return switch (action) {
-			case POWER_TOGGLE, POWER_ON, POWER_OFF, VOLUME_SET, CHANNEL_NEXT, CHANNEL_PREVIOUS -> CinemaPermissions.canChangeContent(player)
-				|| CinemaPermissions.canPlayTunarr(player);
-			case STOP -> CinemaPermissions.canStop(player);
-			case RESUME, UNPAUSE, PAUSE, PAUSE_TOGGLE -> CinemaPermissions.canPause(player);
-			case SEEK, SEEK_FORWARD, SEEK_BACKWARD, RESTART -> CinemaPermissions.canSeek(player);
-			case PLAY_NEXT_NOW, CANCEL_NEXT, CYCLE_SUBTITLE, SELECT_SUBTITLE -> CinemaPermissions.canChangeContent(player);
-			// Any nearby viewer may fill in duration once VLC discovers it (like ReportMediaEnded).
-			case REPORT_DURATION -> true;
-		};
+	/**
+	 * A runtime is a client measurement, so the first plausible report for an epoch wins and later ones are
+	 * dropped. Otherwise a player could shrink the duration and then claim the film had finished.
+	 */
+	private static boolean acceptDurationReport(DisplayBlockEntity display, float valueMs) {
+		if (display.getPlaybackDurationMs() > 0L) {
+			return false;
+		}
+		long duration = (long) valueMs;
+		return duration >= MIN_REPORTED_DURATION_MS && duration <= MAX_REPORTED_DURATION_MS;
 	}
 
 	private static void handleTune(ModNetworkPayloads.ScreenTune payload, ServerPlayer player) {
@@ -172,7 +204,10 @@ public final class ServerNetworking {
 		}
 		OnDemandCatalog.refresh(provider, payload.forceRefresh()).whenComplete((status, error) -> runOnServer(player, () -> {
 			OnDemandCatalog.Page page = OnDemandCatalog.page(provider, payload.kind(), payload.search(), payload.page());
-			List<JellyfinItemSummary> slim = page.items().stream().map(JellyfinItemSummary::forBrowsePacket).toList();
+			List<JellyfinItemSummary> slim = page.items().stream()
+				.map(JellyfinItemSummary::forBrowsePacket)
+				.map(MediaProxy::forClientItem)
+				.toList();
 			ServerPlayNetworking.send(
 				player,
 				new ModNetworkPayloads.JellyfinBrowseResult(
@@ -238,7 +273,7 @@ public final class ServerNetworking {
 				payload.kind(),
 				payload.parentId(),
 				OnDemandCatalog.lastStatus(payload.provider()),
-				items == null ? List.of() : items
+				items == null ? List.of() : items.stream().map(MediaProxy::forClientItem).toList()
 			)
 		);
 	}
@@ -283,12 +318,139 @@ public final class ServerNetworking {
 		}));
 	}
 
+	private static void handleSetPosterArtwork(ModNetworkPayloads.SetPosterArtwork payload, ServerPlayer player) {
+		WallPosterBlockEntity poster = resolvePoster(player, payload.pos());
+		if (poster == null) {
+			ServerPlayNetworking.send(player, new ModNetworkPayloads.ScreenNotice(payload.pos(), "message.pixelreel.poster.gone"));
+			return;
+		}
+		if (!CinemaPermissions.canPlacePosters(player)) {
+			ServerPlayNetworking.send(player, new ModNetworkPayloads.ScreenNotice(payload.pos(), "message.pixelreel.poster.no_permission"));
+			return;
+		}
+		PosterArt art = payload.art();
+		if (art.isEmpty()) {
+			poster.setArt(PosterArt.EMPTY);
+			return;
+		}
+		if (art.isWatching()) {
+			BlockPos target = art.watchingDisplayPos();
+			DisplayBlockEntity display = WatchingDisplays.at(player.level(), target);
+			long rangeSqr = (long) WatchingDisplays.RANGE * WatchingDisplays.RANGE;
+			if (display == null || display.getBlockPos().distSqr(poster.getBlockPos()) > rangeSqr) {
+				display = WatchingDisplays.nearestPlaying(player.level(), poster.getBlockPos());
+				if (display == null) {
+					List<DisplayBlockEntity> nearby = WatchingDisplays.nearby(player.level(), poster.getBlockPos());
+					display = nearby.isEmpty() ? null : nearby.getFirst();
+				}
+			}
+			poster.setArt(PosterArt.watching(display == null ? null : display.getBlockPos()));
+			return;
+		}
+		if (art.isUpload()) {
+			poster.setArt(CustomPosterStore.load(art.uploadId()) != null ? PosterArt.uploaded(art.uploadId(), art.title()) : PosterArt.EMPTY);
+			return;
+		}
+		if (art.isLocal()) {
+			// Every client resolves this name inside its own poster folder, so keep it to a plain file name.
+			poster.setArt(isPlainFileName(art.localFileName()) ? art : PosterArt.EMPTY);
+			return;
+		}
+		if (art.itemId().isEmpty()) {
+			acceptCustomPosterUrl(poster, player, art);
+			return;
+		}
+		// Re-resolve the artwork URL from the catalog so the stored link is server-authoritative, keeping the
+		// client-supplied one only as a fallback when the item can no longer be looked up.
+		OnDemandCatalog.fetchItem(art.provider(), art.itemId()).whenComplete((item, error) -> runOnServer(player, () -> {
+			if (poster.isRemoved()) {
+				return;
+			}
+			String resolved = item == null
+				? art.imageUrl()
+				: item.map(JellyfinItemSummary::imageUrl).filter(url -> !url.isBlank()).orElse(art.imageUrl());
+			poster.setArt(art.withImageUrl(resolved));
+		}));
+	}
+
+	/**
+	 * A hung URL is fetched by every client that can see the poster, so it is checked for shape, against the
+	 * admin allowlist, and finally by resolving the host off-thread to make sure it is publicly routable.
+	 */
+	private static void acceptCustomPosterUrl(WallPosterBlockEntity poster, ServerPlayer player, PosterArt art) {
+		String url = art.imageUrl();
+		if (!CinemaPermissions.canUseCustomPosterUrls(player)) {
+			ServerPlayNetworking.send(player, new ModNetworkPayloads.ScreenNotice(poster.getBlockPos(), "message.pixelreel.poster.no_permission"));
+			return;
+		}
+		if (!PosterImages.isSafeHttpUrl(url)
+			|| !PosterImages.isAllowedByHostPolicy(url, ConfigManager.get().posterUrlHostAllowlist)) {
+			PixelReel.LOGGER.debug("Rejected poster artwork from {}: address not permitted", player.getName().getString());
+			ServerPlayNetworking.send(player, new ModNetworkPayloads.ScreenNotice(poster.getBlockPos(), "message.pixelreel.poster.unsafe_url"));
+			return;
+		}
+		BlockPos pos = poster.getBlockPos().immutable();
+		CompletableFuture.supplyAsync(() -> PosterImages.resolvesToPublicHost(url)).whenComplete((allowed, error) -> runOnServer(player, () -> {
+			if (poster.isRemoved()) {
+				return;
+			}
+			if (allowed == null || !allowed) {
+				PixelReel.LOGGER.debug("Rejected poster artwork from {}: host resolves to a private address", player.getName().getString());
+				ServerPlayNetworking.send(player, new ModNetworkPayloads.ScreenNotice(pos, "message.pixelreel.poster.unsafe_url"));
+				return;
+			}
+			poster.setArt(PosterArt.fromUrl(url, art.title()));
+		}));
+	}
+
+	private static boolean isPlainFileName(String name) {
+		return !name.isEmpty()
+			&& name.indexOf('/') < 0
+			&& name.indexOf('\\') < 0
+			&& name.indexOf(':') < 0
+			&& !name.contains("..");
+	}
+
+	private static @Nullable WallPosterBlockEntity resolvePoster(ServerPlayer player, BlockPos pos) {
+		if (!(player.level() instanceof ServerLevel level) || !level.isLoaded(pos)) {
+			return null;
+		}
+		if (player.distanceToSqr(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5) > MAX_POSTER_DISTANCE_SQR) {
+			return null;
+		}
+		return WallPosterBlock.posterAt(level, pos);
+	}
+
 	private static void handleMediaEnded(ModNetworkPayloads.ReportMediaEnded payload, ServerPlayer player) {
 		DisplayBlockEntity display = ScreenControllerLogic.resolve(player, payload.pos());
 		if (display == null || display.getChannelEpoch() != payload.channelEpoch()) {
 			return;
 		}
+		if (display.isPlaybackPaused() || !CinemaPermissions.canWatch(player)) {
+			return;
+		}
+		if (!isBelievableEnd(display)) {
+			PixelReel.LOGGER.debug(
+				"Ignoring media-ended from {} at {} — display is at {}ms / {}ms",
+				player.getGameProfile().getName(),
+				payload.pos().toShortString(),
+				display.currentPlaybackPositionMs(),
+				display.getPlaybackDurationMs()
+			);
+			return;
+		}
 		ScreenControllerLogic.onMediaEnded(display);
+	}
+
+	/**
+	 * With a known runtime the authoritative clock decides. With an unknown runtime the claim is only taken
+	 * once the media has genuinely been rolling for a while, so a player who walks up cannot skip a film.
+	 */
+	private static boolean isBelievableEnd(DisplayBlockEntity display) {
+		if (display.getPlaybackDurationMs() > 0L) {
+			return display.isNearPlaybackEnd();
+		}
+		return display.currentPlaybackPositionMs() >= MIN_ELAPSED_BEFORE_END_MS;
 	}
 
 	private static void handleRequestJellyfinConfig(ServerPlayer player) {
@@ -583,7 +745,24 @@ public final class ServerNetworking {
 		if (entries.size() > ModNetworkPayloads.MAX_CHANNELS) {
 			entries = entries.subList(0, ModNetworkPayloads.MAX_CHANNELS);
 		}
+		boolean watch = CinemaPermissions.canWatch(player);
+		entries = entries.stream().map(entry -> proxiedChannel(entry, watch)).toList();
 		ServerPlayNetworking.send(player, new ModNetworkPayloads.ChannelList(status, entries));
+	}
+
+	private static ChannelEntry proxiedChannel(ChannelEntry entry, boolean includeStream) {
+		Channel channel = entry.channel();
+		return new ChannelEntry(
+			new Channel(
+				channel.id(),
+				channel.number(),
+				channel.name(),
+				MediaProxy.forClient(MediaProxy.Kind.IMAGE, channel.logoUrl()),
+				MediaProxy.forClient(MediaProxy.Kind.IMAGE, channel.guideIconUrl()),
+				includeStream ? MediaProxy.forClient(MediaProxy.Kind.STREAM, channel.streamUrl()) : ""
+			),
+			entry.guide()
+		);
 	}
 
 	private static void runOnServer(ServerPlayer player, Runnable action) {

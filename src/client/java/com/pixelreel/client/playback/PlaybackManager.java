@@ -3,6 +3,7 @@ package com.pixelreel.client.playback;
 import com.pixelreel.PixelReel;
 import com.pixelreel.blockentities.DisplayBlockEntity;
 import com.pixelreel.client.ClientNetworking;
+import com.pixelreel.client.playback.video.ToneMapMode;
 import com.pixelreel.client.playback.video.VideoTexture;
 import com.pixelreel.config.ConfigManager;
 import com.pixelreel.config.PixelReelConfig;
@@ -59,7 +60,7 @@ public final class PlaybackManager {
 	public void retry(BlockPos controllerPos) {
 		Minecraft minecraft = Minecraft.getInstance();
 		if (minecraft.level != null && minecraft.level.getBlockEntity(controllerPos) instanceof DisplayBlockEntity display) {
-			ChannelPlayer player = this.players.get(display.getStreamUrl());
+			ChannelPlayer player = this.players.get(ClientPlaybackSecrets.knownStreamUrl(display));
 			if (player != null) {
 				player.retry();
 			}
@@ -124,12 +125,16 @@ public final class PlaybackManager {
 			if (!display.shouldPlay()) {
 				continue;
 			}
-			String url = display.getStreamUrl();
-			if (url == null || url.isEmpty()) {
-				continue;
-			}
 			Vec3 centre = display.screenCentre();
 			double distanceSqr = player.distanceToSqr(centre);
+			if (distanceSqr > keepAliveDistanceSqr) {
+				continue;
+			}
+			// Asking costs a packet, so only do it once the screen is close enough to actually start.
+			String url = ClientPlaybackSecrets.resolveForPlayback(display);
+			if (url.isEmpty()) {
+				continue;
+			}
 			boolean alreadyPlaying = this.players.containsKey(url);
 			double limitSqr = alreadyPlaying ? keepAliveDistanceSqr : startDistanceSqr;
 			if (distanceSqr > limitSqr) {
@@ -169,8 +174,8 @@ public final class PlaybackManager {
 				channelPlayer = new ChannelPlayer(
 					url,
 					onDemand,
-					onDemand ? display.getStartPositionMs() : 0L,
-					onDemand && display.isHdrContent()
+					onDemand ? display.currentPlaybackPositionMs() : 0L,
+					toneMapMode(display, onDemand)
 				);
 				this.players.put(url, channelPlayer);
 				this.playerEpochs.put(url, epoch);
@@ -209,6 +214,13 @@ public final class PlaybackManager {
 			this.audioRefreshUntilMs = System.currentTimeMillis() + 750L;
 		}
 		boolean refreshAudio = closedAny || System.currentTimeMillis() < this.audioRefreshUntilMs;
+		Vec3 listener = player.position().add(0.0, player.getBbHeight() * 0.5, 0.0);
+		double edgeFade = config.audioZoneEdgeFadeBlocks;
+		boolean glasses = PixelGlassesItem.isWearing(player);
+
+		record Audible(String url, ChannelPlayer channelPlayer, DisplayBlockEntity display, double distanceSqr, float gain, boolean zoned, double zoneDepth, double zoneOutside) {
+		}
+		List<Audible> audibles = new ArrayList<>();
 
 		for (Map.Entry<String, ChannelPlayer> entry : this.players.entrySet()) {
 			ChannelPlayer channelPlayer = entry.getValue();
@@ -220,7 +232,7 @@ public final class PlaybackManager {
 			Binding nearest = bindings.stream().min(Comparator.comparingDouble(Binding::distanceSqr)).orElseThrow();
 			DisplayBlockEntity display = nearest.display();
 			if (display.isOnDemand()) {
-				channelPlayer.setSubtitleUrl(display.getSubtitleFetchUrl());
+				channelPlayer.setSubtitleUrl(ClientPlaybackSecrets.subtitleUrl(display));
 				boolean paused = display.isPlaybackPaused() || display.isSuspended();
 				channelPlayer.setDesiredPaused(paused);
 				long target = display.currentPlaybackPositionMs();
@@ -238,7 +250,9 @@ public final class PlaybackManager {
 
 			channelPlayer.tick();
 			if (display.isOnDemand()
-				&& channelPlayer.status() == PlaybackStatus.ENDED
+				&& !display.isPlaybackPaused()
+				&& display.isNearPlaybackEnd()
+				&& channelPlayer.looksGenuinelyEnded()
 				&& this.endedReports.add(entry.getKey())) {
 				ClientNetworking.reportMediaEnded(display.getBlockPos(), display.getChannelEpoch());
 			}
@@ -248,17 +262,86 @@ public final class PlaybackManager {
 				volume = Math.max(volume, binding.display().getVolume());
 				audioRange = Math.max(audioRange, binding.display().type().audioRange());
 			}
-			boolean glasses = PixelGlassesItem.isWearing(player);
-			double distance = Math.sqrt(nearest.distanceSqr());
-			double normalized = glasses ? 1.0 : softDistanceGain(distance, audioRange);
+			boolean zoned = display.hasAudioZone();
+			double zoneGain = display.audioZoneGain(listener, edgeFade);
+			double normalized;
+			if (zoned) {
+				// Glasses only boost inside the room; outside stays silent.
+				normalized = zoneGain;
+			} else {
+				double distance = Math.sqrt(nearest.distanceSqr());
+				normalized = glasses ? 1.0 : softDistanceGain(distance, audioRange);
+			}
 			float gain = (float)(volume * globalVolume * normalized);
 			if (display.isOnDemand() && display.isPlaybackPaused()) {
 				gain = 0.0F;
 			}
-			if (refreshAudio) {
-				channelPlayer.markVolumeDirty();
+			audibles.add(new Audible(
+				entry.getKey(),
+				channelPlayer,
+				display,
+				nearest.distanceSqr(),
+				gain,
+				zoned,
+				zoned ? display.audioZoneDepth(listener) : 0.0,
+				zoned ? display.audioZoneOutsideDistance(listener) : Double.POSITIVE_INFINITY
+			));
+		}
+
+		// Inside claimed theaters: pick the room you're deepest into (not merely nearest screen).
+		String preferZonedUrl = null;
+		double preferDepth = -1.0;
+		double preferDistance = Double.MAX_VALUE;
+		for (Audible audible : audibles) {
+			if (!audible.zoned() || audible.gain() <= 0.0F) {
+				continue;
 			}
-			channelPlayer.tickAudio(gain);
+			if (audible.zoneDepth() > preferDepth
+				|| (audible.zoneDepth() == preferDepth && audible.distanceSqr() < preferDistance)) {
+				preferDepth = audible.zoneDepth();
+				preferDistance = audible.distanceSqr();
+				preferZonedUrl = audible.url();
+			}
+		}
+		final String exclusiveUrl = preferZonedUrl;
+		boolean insideClaimedTheater = exclusiveUrl != null;
+
+		// In a hallway: pre-warm the nearest zone's audio track at volume 0 so entry unmutes instantly.
+		final double warmOutsideBlocks = 3.0;
+		String warmUrl = null;
+		double warmOutside = Double.MAX_VALUE;
+		if (!insideClaimedTheater) {
+			for (Audible audible : audibles) {
+				if (!audible.zoned()) {
+					continue;
+				}
+				double outside = audible.zoneOutside();
+				if (outside > 0.0 && outside <= warmOutsideBlocks && outside < warmOutside) {
+					warmOutside = outside;
+					warmUrl = audible.url();
+				}
+			}
+		}
+		final String warmTrackUrl = warmUrl;
+
+		record GainPlan(Audible audible, float gain, boolean warm) {
+		}
+		List<GainPlan> plans = new ArrayList<>(audibles.size());
+		for (Audible audible : audibles) {
+			float gain = audible.gain();
+			if (insideClaimedTheater && !exclusiveUrl.equals(audible.url())) {
+				gain = 0.0F;
+			}
+			boolean warm = gain <= 0.0F && warmTrackUrl != null && warmTrackUrl.equals(audible.url());
+			plans.add(new GainPlan(audible, gain, warm));
+		}
+		// Enable / raise volume first, then mute others — avoids a silent gap while VLC reselects a track.
+		plans.sort(Comparator.comparingDouble((GainPlan p) -> p.gain() > 0.0F ? 0.0 : (p.warm() ? 1.0 : 2.0)));
+		for (GainPlan plan : plans) {
+			if (refreshAudio) {
+				plan.audible().channelPlayer().markVolumeDirty();
+			}
+			plan.audible().channelPlayer().tickAudio(plan.gain(), plan.warm());
 		}
 	}
 
@@ -280,9 +363,19 @@ public final class PlaybackManager {
 		return com.pixelreel.channels.ChannelService.hostOnly(url);
 	}
 
+	/**
+	 * On-demand items carry a colour range from the library, so trust it either way and never tone map SDR.
+	 * Live channels arrive without any metadata, which is the only case left for guessing from the frames.
+	 */
+	private static ToneMapMode toneMapMode(DisplayBlockEntity display, boolean onDemand) {
+		if (!onDemand) {
+			return ToneMapMode.AUTO;
+		}
+		return display.isHdrContent() ? ToneMapMode.HDR : ToneMapMode.SDR;
+	}
+
 	public @Nullable PictureHandle pictureFor(DisplayBlockEntity display) {
-		String url = display.getStreamUrl();
-		ChannelPlayer current = this.players.get(url);
+		ChannelPlayer current = this.players.get(ClientPlaybackSecrets.knownStreamUrl(display));
 		if (current != null && current.hasPicture() && current.uploadFrame()) {
 			VideoTexture texture = current.videoTexture();
 			return new PictureHandle(
@@ -298,7 +391,7 @@ public final class PlaybackManager {
 	}
 
 	public @Nullable PlaybackStatus statusFor(DisplayBlockEntity display) {
-		ChannelPlayer player = this.players.get(display.getStreamUrl());
+		ChannelPlayer player = this.players.get(ClientPlaybackSecrets.knownStreamUrl(display));
 		return player == null ? null : player.status();
 	}
 

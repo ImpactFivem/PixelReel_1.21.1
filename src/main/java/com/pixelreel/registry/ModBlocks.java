@@ -3,7 +3,10 @@ package com.pixelreel.registry;
 import com.pixelreel.PixelReel;
 import com.pixelreel.blocks.DisplayBlock;
 import com.pixelreel.blocks.DisplayType;
+import com.pixelreel.blocks.PosterPanelBlock;
 import com.pixelreel.blocks.ScreenPanelBlock;
+import com.pixelreel.blocks.WallPosterBlock;
+import com.pixelreel.poster.PosterSize;
 import java.util.List;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -19,10 +22,14 @@ public final class ModBlocks {
 	public static final DisplayBlock ULTRAWIDE_MONITOR = registerDisplay(DisplayType.ULTRAWIDE_MONITOR);
 	public static final DisplayBlock CINEMA_SCREEN = registerDisplay(DisplayType.CINEMA_SCREEN);
 	public static final DisplayBlock CURVED_CINEMA_SCREEN = registerDisplay(DisplayType.CURVED_CINEMA_SCREEN);
+	public static final DisplayBlock GIANT_CINEMA_SCREEN = registerDisplay(DisplayType.GIANT_CINEMA_SCREEN);
 	public static final ScreenPanelBlock SCREEN_PANEL = registerPanel();
+	public static final WallPosterBlock WALL_POSTER = registerWallPoster(PosterSize.STANDARD);
+	public static final WallPosterBlock HUGE_WALL_POSTER = registerWallPoster(PosterSize.HUGE);
+	public static final PosterPanelBlock POSTER_PANEL = registerPosterPanel();
 
 	public static final List<DisplayBlock> ALL_DISPLAYS = List.of(
-		COMPACT_TELEVISION, WALL_TELEVISION, ULTRAWIDE_MONITOR, CINEMA_SCREEN, CURVED_CINEMA_SCREEN
+		COMPACT_TELEVISION, WALL_TELEVISION, ULTRAWIDE_MONITOR, CINEMA_SCREEN, CURVED_CINEMA_SCREEN, GIANT_CINEMA_SCREEN
 	);
 
 	private ModBlocks() {
@@ -52,6 +59,35 @@ public final class ModBlocks {
 			.isSuffocating((state, level, pos) -> false)
 			.isViewBlocking((state, level, pos) -> false);
 		return Registry.register(BuiltInRegistries.BLOCK, PixelReel.id("screen_panel"), new ScreenPanelBlock(properties));
+	}
+
+	private static WallPosterBlock registerWallPoster(PosterSize size) {
+		return Registry.register(
+			BuiltInRegistries.BLOCK,
+			PixelReel.id(size.id()),
+			new WallPosterBlock(posterProperties(), size)
+		);
+	}
+
+	private static PosterPanelBlock registerPosterPanel() {
+		return Registry.register(
+			BuiltInRegistries.BLOCK,
+			PixelReel.id("poster_panel"),
+			new PosterPanelBlock(posterProperties().noLootTable())
+		);
+	}
+
+	private static BlockBehaviour.Properties posterProperties() {
+		return BlockBehaviour.Properties.of()
+			.mapColor(MapColor.TERRACOTTA_WHITE)
+			.strength(0.2F)
+			.sound(SoundType.WOOL)
+			.noOcclusion()
+			.noCollission()
+			.pushReaction(PushReaction.DESTROY)
+			.isRedstoneConductor((state, level, pos) -> false)
+			.isSuffocating((state, level, pos) -> false)
+			.isViewBlocking((state, level, pos) -> false);
 	}
 
 	public static void init() {

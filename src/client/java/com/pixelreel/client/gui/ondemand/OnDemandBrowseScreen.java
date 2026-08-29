@@ -20,7 +20,7 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
 /** this handles pagination for content if you have more than 48 items. i know 48 it just looked better ok*/
-public class OnDemandBrowseScreen extends Screen {
+public class OnDemandBrowseScreen extends Screen implements BrowseResultListener {
 	private static final int HEADER_HEIGHT = 52;
 	private static final int FOOTER_HEIGHT = 48;
 	private static final int CARD_GAP = 8;
@@ -129,6 +129,7 @@ public class OnDemandBrowseScreen extends Screen {
 		ClientNetworking.requestJellyfinBrowse(this.provider, this.kind, this.lastRequestedSearch, this.page, force);
 	}
 
+	@Override
 	public void onBrowseUpdated() {
 		if (ClientMediaCache.INSTANCE.browseKind() != this.kind
 			|| ClientMediaCache.INSTANCE.browseProvider() != this.provider) {

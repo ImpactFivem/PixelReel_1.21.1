@@ -96,6 +96,19 @@ public final class OnDemandCatalog {
 		};
 	}
 
+	/** Upstream artwork URL (still keyed). Used only on the server to mint a proxy grant. */
+	public static String artworkUrl(OnDemandProvider provider, String itemId) {
+		Optional<JellyfinItemSummary> found = find(provider, itemId);
+		if (found.isPresent() && !found.get().imageUrl().isBlank()) {
+			return found.get().imageUrl();
+		}
+		return switch (provider) {
+			case JELLYFIN -> JellyfinService.INSTANCE.imageUrl(itemId);
+			case EMBY -> EmbyService.INSTANCE.imageUrl(itemId);
+			case PLEX -> PlexService.INSTANCE.imageUrl(itemId);
+		};
+	}
+
 	public static CompletableFuture<Optional<JellyfinItemSummary>> fetchItem(OnDemandProvider provider, String itemId) {
 		return switch (provider) {
 			case JELLYFIN -> JellyfinService.INSTANCE.fetchItem(itemId);

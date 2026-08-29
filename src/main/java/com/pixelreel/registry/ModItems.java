@@ -4,6 +4,7 @@ import com.pixelreel.PixelReel;
 import com.pixelreel.blocks.DisplayBlock;
 import com.pixelreel.items.DisplayBlockItem;
 import com.pixelreel.items.PixelGlassesItem;
+import com.pixelreel.items.WallPosterItem;
 import java.util.List;
 import java.util.function.Function;
 import net.minecraft.core.Registry;
@@ -17,6 +18,17 @@ public final class ModItems {
 	public static final Item ULTRAWIDE_MONITOR = registerDisplayItem(ModBlocks.ULTRAWIDE_MONITOR, "item.pixelreel.display.type.monitor");
 	public static final Item CINEMA_SCREEN = registerDisplayItem(ModBlocks.CINEMA_SCREEN, "item.pixelreel.display.type.cinema");
 	public static final Item CURVED_CINEMA_SCREEN = registerDisplayItem(ModBlocks.CURVED_CINEMA_SCREEN, "item.pixelreel.display.type.cinema");
+	public static final Item GIANT_CINEMA_SCREEN = registerDisplayItem(ModBlocks.GIANT_CINEMA_SCREEN, "item.pixelreel.display.type.cinema");
+	public static final Item WALL_POSTER = register(
+		"wall_poster",
+		properties -> new WallPosterItem(ModBlocks.WALL_POSTER, properties),
+		new Item.Properties()
+	);
+	public static final Item HUGE_WALL_POSTER = register(
+		"huge_wall_poster",
+		properties -> new WallPosterItem(ModBlocks.HUGE_WALL_POSTER, properties),
+		new Item.Properties()
+	);
 	public static final Item PIXEL_GLASSES = register(
 		"pixel_glasses",
 		PixelGlassesItem::new,
@@ -25,7 +37,15 @@ public final class ModItems {
 	);
 
 	public static final List<Item> TAB_CONTENTS = List.of(
-		COMPACT_TELEVISION, WALL_TELEVISION, ULTRAWIDE_MONITOR, CINEMA_SCREEN, CURVED_CINEMA_SCREEN, PIXEL_GLASSES
+		COMPACT_TELEVISION,
+		WALL_TELEVISION,
+		ULTRAWIDE_MONITOR,
+		CINEMA_SCREEN,
+		CURVED_CINEMA_SCREEN,
+		GIANT_CINEMA_SCREEN,
+		WALL_POSTER,
+		HUGE_WALL_POSTER,
+		PIXEL_GLASSES
 	);
 
 	private ModItems() {

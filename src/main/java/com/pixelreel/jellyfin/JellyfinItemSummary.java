@@ -69,6 +69,27 @@ public record JellyfinItemSummary(
 		)
 	);
 
+	public JellyfinItemSummary withImageUrl(String url) {
+		return new JellyfinItemSummary(
+			this.id,
+			this.kind,
+			this.title,
+			this.overview,
+			this.productionYear,
+			this.runtimeTicks,
+			url == null ? "" : url,
+			this.playbackPositionTicks,
+			this.runTimeTicks,
+			this.played,
+			this.childCount,
+			this.indexNumber,
+			this.parentIndexNumber,
+			this.seriesName,
+			this.seriesId,
+			this.seasonId
+		);
+	}
+
 	public JellyfinItemSummary forBrowsePacket() {
 		if (this.overview == null || this.overview.isEmpty()) {
 			return this;

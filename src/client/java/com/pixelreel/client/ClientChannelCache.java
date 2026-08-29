@@ -34,6 +34,18 @@ public final class ClientChannelCache {
 		this.receivedAt = System.currentTimeMillis();
 	}
 
+	public @Nullable ChannelEntry byId(String id) {
+		if (id == null || id.isEmpty()) {
+			return null;
+		}
+		for (ChannelEntry entry : this.channels) {
+			if (id.equals(entry.channel().id())) {
+				return entry;
+			}
+		}
+		return null;
+	}
+
 	public @Nullable ChannelEntry byNumber(int number) {
 		for (ChannelEntry entry : this.channels) {
 			if (entry.channel().number() == number) {

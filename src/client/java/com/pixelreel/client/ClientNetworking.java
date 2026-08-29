@@ -1,22 +1,26 @@
 package com.pixelreel.client;
 
 import com.pixelreel.blockentities.DisplayBlockEntity;
+import com.pixelreel.blocks.WallPosterBlock;
 import com.pixelreel.channels.ChannelService;
 import com.pixelreel.client.gui.MediaSourceScreen;
 import com.pixelreel.client.gui.emby.EmbyConfigScreen;
 import com.pixelreel.client.gui.jellyfin.JellyfinConfigScreen;
-import com.pixelreel.client.gui.ondemand.OnDemandBrowseScreen;
+import com.pixelreel.client.gui.ondemand.BrowseResultListener;
 import com.pixelreel.client.gui.ondemand.OnDemandDetailScreen;
 import com.pixelreel.client.gui.ondemand.OnDemandEpisodeScreen;
 import com.pixelreel.client.gui.ondemand.OnDemandSeriesScreen;
 import com.pixelreel.client.gui.plex.PlexConfigScreen;
+import com.pixelreel.client.gui.poster.PosterPickerScreen;
 import com.pixelreel.client.gui.tunarr.ChannelMenuScreen;
 import com.pixelreel.client.gui.tunarr.TunarrConfigScreen;
 import com.pixelreel.client.playback.ChannelPlayer;
+import com.pixelreel.client.playback.ClientPlaybackSecrets;
 import com.pixelreel.client.playback.PlaybackManager;
 import com.pixelreel.networking.ModNetworkPayloads;
 import com.pixelreel.networking.ScreenAction;
 import com.pixelreel.ondemand.OnDemandProvider;
+import com.pixelreel.poster.PosterArt;
 import java.util.List;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.Minecraft;
@@ -61,10 +65,23 @@ public final class ClientNetworking {
 
 		ClientPlayNetworking.registerGlobalReceiver(ModNetworkPayloads.MediaFeatures.TYPE, (payload, context) -> {
 			ClientMediaCache.INSTANCE.acceptFeatures(payload);
-			if (Minecraft.getInstance().screen instanceof MediaSourceScreen screen) {
-				screen.onFeaturesUpdated();
+			var screen = Minecraft.getInstance().screen;
+			if (screen instanceof MediaSourceScreen sourceScreen) {
+				sourceScreen.onFeaturesUpdated();
+			} else if (screen instanceof PosterPickerScreen pickerScreen) {
+				pickerScreen.onFeaturesUpdated();
 			}
 		});
+
+		ClientPlayNetworking.registerGlobalReceiver(ModNetworkPayloads.OpenPosterPicker.TYPE, (payload, context) ->
+			openPosterPicker(payload.pos())
+		);
+		ClientPlayNetworking.registerGlobalReceiver(ModNetworkPayloads.CustomPosterChunk.TYPE, (payload, context) ->
+			com.pixelreel.client.poster.CustomPosterClient.accept(payload)
+		);
+		ClientPlayNetworking.registerGlobalReceiver(ModNetworkPayloads.PlaybackSecretsData.TYPE, (payload, context) ->
+			ClientPlaybackSecrets.accept(payload)
+		);
 
 		ClientPlayNetworking.registerGlobalReceiver(ModNetworkPayloads.JellyfinBrowseResult.TYPE, (payload, context) -> {
 			// Drop out-of-order replies so an older page cannot wipe a newer one.
@@ -75,7 +92,7 @@ public final class ClientNetworking {
 				return;
 			}
 			ClientMediaCache.INSTANCE.acceptBrowse(payload);
-			if (Minecraft.getInstance().screen instanceof OnDemandBrowseScreen screen) {
+			if (Minecraft.getInstance().screen instanceof BrowseResultListener screen) {
 				screen.onBrowseUpdated();
 			}
 		});
@@ -272,6 +289,21 @@ public final class ClientNetworking {
 		ClientPlayNetworking.send(new ModNetworkPayloads.ScreenTune(pos, channelId));
 	}
 
+	public static void setPosterArtwork(BlockPos pos, PosterArt art) {
+		if (ClientPlayNetworking.canSend(ModNetworkPayloads.SetPosterArtwork.TYPE)) {
+			ClientPlayNetworking.send(new ModNetworkPayloads.SetPosterArtwork(pos, art));
+		}
+	}
+
+	public static void openPosterPicker(BlockPos pos) {
+		Minecraft minecraft = Minecraft.getInstance();
+		minecraft.execute(() -> {
+			if (minecraft.level != null && WallPosterBlock.posterAt(minecraft.level, pos) != null) {
+				minecraft.setScreen(new PosterPickerScreen(pos));
+			}
+		});
+	}
+
 	public static void openMenu(BlockPos pos) {
 		Minecraft minecraft = Minecraft.getInstance();
 		minecraft.execute(() -> {
@@ -289,7 +321,8 @@ public final class ClientNetworking {
 		if (!(minecraft.level.getBlockEntity(pos) instanceof DisplayBlockEntity display)) {
 			return;
 		}
-		ChannelPlayer player = PlaybackManager.INSTANCE.player(display.getStreamUrl());
+		String url = ClientPlaybackSecrets.knownStreamUrl(display);
+		ChannelPlayer player = PlaybackManager.INSTANCE.player(url);
 		if (player == null) {
 			minecraft.player.sendSystemMessage(Component.translatable("chat.pixelreel.status.player_idle"));
 			return;
@@ -302,7 +335,7 @@ public final class ClientNetworking {
 				"chat.pixelreel.status.player",
 				player.status().name(),
 				frame,
-				ChannelService.hostOnly(display.getStreamUrl()),
+				ChannelService.hostOnly(url),
 				Math.round(player.bufferingProgress()) + "%",
 				player.errorDetail().isEmpty() ? "-" : player.errorDetail()
 			)

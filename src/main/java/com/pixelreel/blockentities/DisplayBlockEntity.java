@@ -1,6 +1,7 @@
 package com.pixelreel.blockentities;
 
 import com.pixelreel.ClientBridge;
+import com.pixelreel.audio.AudioZone;
 import com.pixelreel.blocks.DisplayBlock;
 import com.pixelreel.blocks.DisplayType;
 import com.pixelreel.channels.Channel;
@@ -9,6 +10,7 @@ import com.pixelreel.jellyfin.JellyfinItemKind;
 import com.pixelreel.jellyfin.JellyfinItemSummary;
 import com.pixelreel.media.MediaSource;
 import com.pixelreel.media.SubtitleTrack;
+import com.pixelreel.poster.WatchingArtwork;
 import com.pixelreel.registry.ModBlockEntities;
 import java.util.List;
 import net.minecraft.core.BlockPos;
@@ -62,6 +64,7 @@ public class DisplayBlockEntity extends BlockEntity {
 	private static final String KEY_PLEX_MEDIA = "PlexMediaIdx";
 	private static final String KEY_PLEX_PART = "PlexPartIdx";
 	private static final String KEY_PLEX_PART_KEY = "PlexPartKey";
+	private static final String KEY_AUDIO_ZONE = "AudioZone";
 
 	public static final int MAX_STREAM_URL = 2048;
 	public static final int MAX_OVERVIEW = 1024;
@@ -76,6 +79,7 @@ public class DisplayBlockEntity extends BlockEntity {
 	private int channelEpoch;
 	private int ticksAlive;
 	private boolean panelsValidated;
+	private boolean needsStreamResolve;
 	private @Nullable String lastPlaybackProblem;
 
 	private MediaSource mediaSource = MediaSource.TUNARR;
@@ -108,6 +112,7 @@ public class DisplayBlockEntity extends BlockEntity {
 	private int plexMediaIndex;
 	private int plexPartIndex;
 	private String plexPartKey = "";
+	private @Nullable AudioZone audioZone;
 
 	public DisplayBlockEntity(BlockPos pos, BlockState state) {
 		super(ModBlockEntities.DISPLAY, pos, state);
@@ -154,6 +159,42 @@ public class DisplayBlockEntity extends BlockEntity {
 
 	public float getVolume() {
 		return this.volume;
+	}
+
+	public boolean hasAudioZone() {
+		return this.audioZone != null;
+	}
+
+	public @Nullable AudioZone getAudioZone() {
+		return this.audioZone;
+	}
+
+	public void setAudioZone(@Nullable AudioZone zone) {
+		this.audioZone = zone;
+		this.markDirtyAndSync();
+	}
+
+	public void clearAudioZone() {
+		this.setAudioZone(null);
+	}
+
+	/** Gain in [0,1] for theater zoning; 1 means use normal distance/glasses rules when no zone. */
+	public double audioZoneGain(Vec3 listener, double edgeFadeBlocks) {
+		AudioZone zone = this.audioZone;
+		if (zone == null) {
+			return 1.0;
+		}
+		return zone.edgeGain(listener, edgeFadeBlocks);
+	}
+
+	public double audioZoneDepth(Vec3 listener) {
+		AudioZone zone = this.audioZone;
+		return zone == null ? 0.0 : zone.depthInside(listener);
+	}
+
+	public double audioZoneOutsideDistance(Vec3 listener) {
+		AudioZone zone = this.audioZone;
+		return zone == null ? Double.POSITIVE_INFINITY : zone.distanceOutside(listener);
 	}
 
 	public int getChannelEpoch() {
@@ -300,8 +341,12 @@ public class DisplayBlockEntity extends BlockEntity {
 		return this.autoplayAtMillis > 0L && !this.nextEpisodeItemId.isEmpty();
 	}
 
+	/**
+	 * Whether something is tuned in. Deliberately independent of {@link #getStreamUrl()}: the URL is a secret
+	 * that never reaches the client, so a client-side copy of this entity would otherwise think it is idle.
+	 */
 	public boolean hasChannel() {
-		return !this.streamUrl.isEmpty() && (!this.channelId.isEmpty() || !this.jellyfinItemId.isEmpty());
+		return !this.channelId.isEmpty() || !this.jellyfinItemId.isEmpty();
 	}
 
 	public boolean shouldPlay() {
@@ -317,6 +362,14 @@ public class DisplayBlockEntity extends BlockEntity {
 		}
 		long elapsed = Math.max(0L, System.currentTimeMillis() - this.playbackAnchorMillis);
 		return clampPos(this.playbackPositionMs + elapsed);
+	}
+
+	/** True when the authoritative clock is close enough to the end that a client `finished` event is believable. */
+	public boolean isNearPlaybackEnd() {
+		if (!this.isOnDemand() || this.playbackDurationMs <= 0L) {
+			return true;
+		}
+		return this.currentPlaybackPositionMs() + 15_000L >= this.playbackDurationMs;
 	}
 
 	private long clampPos(long positionMs) {
@@ -350,7 +403,7 @@ public class DisplayBlockEntity extends BlockEntity {
 			if (this.level != null && state.hasProperty(DisplayBlock.POWERED)) {
 				this.level.setBlock(this.worldPosition, state.setValue(DisplayBlock.POWERED, value), 3);
 			}
-			this.markDirtyAndSync();
+			this.markDirtyAndSyncWithSecrets();
 		}
 	}
 
@@ -363,7 +416,7 @@ public class DisplayBlockEntity extends BlockEntity {
 			if (value) {
 				this.clearAutoplay();
 			}
-			this.markDirtyAndSync();
+			this.markDirtyAndSyncWithSecrets();
 		}
 	}
 
@@ -377,7 +430,7 @@ public class DisplayBlockEntity extends BlockEntity {
 		this.clearJellyfinFields();
 		this.hdrContent = false;
 		this.channelEpoch++;
-		this.markDirtyAndSync();
+		this.markDirtyAndSyncWithSecrets();
 	}
 
 	public void playJellyfin(
@@ -450,7 +503,12 @@ public class DisplayBlockEntity extends BlockEntity {
 		this.mediaTitle = item.title();
 		this.mediaOverview = clampLength(item.overview(), MAX_OVERVIEW);
 		this.mediaYear = item.productionYear();
-		this.mediaImageUrl = item.imageUrl();
+		this.mediaImageUrl = WatchingArtwork.seriesPosterUrl(
+			item.imageUrl(),
+			item.id(),
+			item.seriesId(),
+			item.kind()
+		);
 		String prefix = switch (provider) {
 			case JELLYFIN -> "jf:";
 			case EMBY -> "emby:";
@@ -481,7 +539,7 @@ public class DisplayBlockEntity extends BlockEntity {
 		this.clearAutoplay();
 		this.channelEpoch++;
 		this.progressReportTicks = 0;
-		this.markDirtyAndSync();
+		this.markDirtyAndSyncWithSecrets();
 	}
 
 	public void applySubtitleSelection(int subtitleIndex, String subtitleUrl) {
@@ -500,7 +558,7 @@ public class DisplayBlockEntity extends BlockEntity {
 				this.channelEpoch++;
 			}
 		}
-		this.markDirtyAndSync();
+		this.markDirtyAndSyncWithSecrets();
 	}
 
 	public int nextSubtitleIndex() {
@@ -626,6 +684,10 @@ public class DisplayBlockEntity extends BlockEntity {
 				}
 			}
 		}
+		if (this.needsStreamResolve) {
+			this.needsStreamResolve = false;
+			com.pixelreel.server.ScreenControllerLogic.restoreStreamAfterLoad(this);
+		}
 		if (this.hasAutoplayPending() && System.currentTimeMillis() >= this.autoplayAtMillis) {
 			String nextId = this.nextEpisodeItemId;
 			this.clearAutoplay();
@@ -678,6 +740,20 @@ public class DisplayBlockEntity extends BlockEntity {
 		}
 	}
 
+	/** Syncs the public state and separately pushes the withheld URLs to whoever is allowed to play this screen. */
+	private void markDirtyAndSyncWithSecrets() {
+		this.markDirtyAndSync();
+		if (this.level != null && !this.level.isClientSide()) {
+			com.pixelreel.networking.PlaybackSecrets.broadcastUpdate(this);
+		}
+	}
+
+	/**
+	 * Note what is <em>not</em> written here: the stream URL, subtitle URL, Plex part key and artwork URL all
+	 * embed an API key or token for the media server. This tag reaches both the world save and every client
+	 * with the chunk loaded, so those stay in memory only and are handed out per-player by
+	 * {@link com.pixelreel.networking.PlaybackSecrets}. After a reload they are rebuilt from the item id.
+	 */
 	@Override
 	protected void saveAdditional(CompoundTag output, HolderLookup.Provider registries) {
 		super.saveAdditional(output, registries);
@@ -686,7 +762,6 @@ public class DisplayBlockEntity extends BlockEntity {
 		output.putString(KEY_CHANNEL_ID, this.channelId);
 		output.putInt(KEY_CHANNEL_NUMBER, this.channelNumber);
 		output.putString(KEY_CHANNEL_NAME, this.channelName);
-		output.putString(KEY_STREAM_URL, this.streamUrl);
 		output.putFloat(KEY_VOLUME, this.volume);
 		output.putInt(KEY_EPOCH, this.channelEpoch);
 		output.putString(KEY_MEDIA_SOURCE, this.mediaSource.name());
@@ -699,7 +774,6 @@ public class DisplayBlockEntity extends BlockEntity {
 		output.putString(KEY_MEDIA_TITLE, this.mediaTitle);
 		output.putString(KEY_MEDIA_OVERVIEW, this.mediaOverview);
 		output.putInt(KEY_MEDIA_YEAR, this.mediaYear);
-		output.putString(KEY_MEDIA_IMAGE, this.mediaImageUrl);
 		output.putLong(KEY_POS_MS, this.currentPlaybackPositionMs());
 		output.putLong(KEY_DUR_MS, this.playbackDurationMs);
 		output.putBoolean(KEY_PAUSED, this.playbackPaused);
@@ -714,10 +788,13 @@ public class DisplayBlockEntity extends BlockEntity {
 		output.putBoolean(KEY_HDR, this.hdrContent);
 		output.putInt(KEY_SUB_INDEX, this.selectedSubtitleIndex);
 		SubtitleTrack.writeList(output, KEY_SUB_TRACKS, this.subtitleTracks);
-		output.putString(KEY_SUB_URL, this.subtitleFetchUrl);
 		output.putInt(KEY_PLEX_MEDIA, this.plexMediaIndex);
 		output.putInt(KEY_PLEX_PART, this.plexPartIndex);
-		output.putString(KEY_PLEX_PART_KEY, this.plexPartKey);
+		if (this.audioZone != null) {
+			CompoundTag zoneTag = new CompoundTag();
+			this.audioZone.write(zoneTag);
+			output.put(KEY_AUDIO_ZONE, zoneTag);
+		}
 	}
 
 	@Override
@@ -760,6 +837,20 @@ public class DisplayBlockEntity extends BlockEntity {
 		this.plexMediaIndex = Math.max(0, input.contains(KEY_PLEX_MEDIA) ? input.getInt(KEY_PLEX_MEDIA) : 0);
 		this.plexPartIndex = Math.max(0, input.contains(KEY_PLEX_PART) ? input.getInt(KEY_PLEX_PART) : 0);
 		this.plexPartKey = clampLength(input.contains(KEY_PLEX_PART_KEY) ? input.getString(KEY_PLEX_PART_KEY) : "", MAX_STREAM_URL);
+		this.audioZone = input.contains(KEY_AUDIO_ZONE) ? AudioZone.read(input.getCompound(KEY_AUDIO_ZONE)) : null;
+		this.needsStreamResolve = this.streamUrl.isEmpty() && this.hasChannel();
+		if (input.contains(KEY_STREAM_URL) || input.contains(KEY_SUB_URL) || input.contains(KEY_PLEX_PART_KEY) || input.contains(KEY_MEDIA_IMAGE)) {
+			this.setChanged();
+		}
+	}
+
+	/** True once between loading a saved display and rebuilding the stream URL that was left out of the save. */
+	public boolean needsStreamResolve() {
+		return this.needsStreamResolve;
+	}
+
+	public void clearStreamResolveRequest() {
+		this.needsStreamResolve = false;
 	}
 
 	private static JellyfinItemKind parseKind(String raw) {

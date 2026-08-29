@@ -42,4 +42,8 @@ public record LiveStatus(boolean configured, boolean reachable, int channelCount
 	public static LiveStatus online(int channelCount) {
 		return new LiveStatus(true, true, channelCount, channelCount + " channel(s) available");
 	}
+
+	public LiveStatus withoutHosts() {
+		return new LiveStatus(this.configured, this.reachable, this.channelCount, com.pixelreel.poster.MediaHosts.redact(this.detail));
+	}
 }

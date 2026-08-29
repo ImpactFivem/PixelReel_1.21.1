@@ -9,6 +9,7 @@ import com.pixelreel.jellyfin.JellyfinLibrary;
 import com.pixelreel.jellyfin.JellyfinService;
 import com.pixelreel.jellyfin.JellyfinStatus;
 import com.pixelreel.ondemand.OnDemandProvider;
+import com.pixelreel.poster.PosterArt;
 import java.util.ArrayList;
 import java.util.List;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
@@ -22,6 +23,7 @@ public final class ModNetworkPayloads {
 	public static final int MAX_CHANNELS = 2048;
 	public static final int MAX_JF_PAGE = JellyfinService.PAGE_SIZE;
 	public static final int MAX_JF_CHILDREN = 256;
+	public static final int MAX_SECRET_URL = 2048;
 
 	private ModNetworkPayloads() {
 	}
@@ -46,6 +48,10 @@ public final class ModNetworkPayloads {
 		serverbound.register(RequestTunarrConfig.TYPE, RequestTunarrConfig.CODEC);
 		serverbound.register(UpdateTunarrConfig.TYPE, UpdateTunarrConfig.CODEC);
 		serverbound.register(UnequipPixelGlasses.TYPE, UnequipPixelGlasses.CODEC);
+		serverbound.register(SetPosterArtwork.TYPE, SetPosterArtwork.CODEC);
+		serverbound.register(UploadPosterChunk.TYPE, UploadPosterChunk.CODEC);
+		serverbound.register(RequestCustomPoster.TYPE, RequestCustomPoster.CODEC);
+		serverbound.register(RequestPlaybackSecrets.TYPE, RequestPlaybackSecrets.CODEC);
 
 		PayloadTypeRegistry<RegistryFriendlyByteBuf> clientbound = PayloadTypeRegistry.playS2C();
 		clientbound.register(ChannelList.TYPE, ChannelList.CODEC);
@@ -60,6 +66,180 @@ public final class ModNetworkPayloads {
 		clientbound.register(EmbyConfigData.TYPE, EmbyConfigData.CODEC);
 		clientbound.register(PlexConfigData.TYPE, PlexConfigData.CODEC);
 		clientbound.register(TunarrConfigData.TYPE, TunarrConfigData.CODEC);
+		clientbound.register(OpenPosterPicker.TYPE, OpenPosterPicker.CODEC);
+		clientbound.register(CustomPosterChunk.TYPE, CustomPosterChunk.CODEC);
+		clientbound.register(PlaybackSecretsData.TYPE, PlaybackSecretsData.CODEC);
+	}
+
+	/**
+	 * Asks the server for the addresses needed to actually play a screen. Sent only by a client that is about
+	 * to start a session, so the URLs never ride along with the block entity sync.
+	 */
+	public record RequestPlaybackSecrets(BlockPos pos, int channelEpoch) implements CustomPacketPayload {
+		public static final Type<RequestPlaybackSecrets> TYPE = new Type<>(PixelReel.id("request_playback_secrets"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, RequestPlaybackSecrets> CODEC = StreamCodec.composite(
+			BlockPos.STREAM_CODEC,
+			RequestPlaybackSecrets::pos,
+			ByteBufCodecs.VAR_INT,
+			RequestPlaybackSecrets::channelEpoch,
+			RequestPlaybackSecrets::new
+		);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
+	/** Blank URLs mean the request was refused; the client should not retry until the epoch changes. */
+	public record PlaybackSecretsData(
+		BlockPos pos,
+		int channelEpoch,
+		String streamUrl,
+		String subtitleUrl,
+		String imageUrl,
+		String plexPartKey
+	) implements CustomPacketPayload {
+		public static final Type<PlaybackSecretsData> TYPE = new Type<>(PixelReel.id("playback_secrets"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, PlaybackSecretsData> CODEC = StreamCodec.of(
+			(buf, value) -> {
+				BlockPos.STREAM_CODEC.encode(buf, value.pos);
+				buf.writeVarInt(value.channelEpoch);
+				buf.writeUtf(value.streamUrl, MAX_SECRET_URL);
+				buf.writeUtf(value.subtitleUrl, MAX_SECRET_URL);
+				buf.writeUtf(value.imageUrl, MAX_SECRET_URL);
+				buf.writeUtf(value.plexPartKey, MAX_SECRET_URL);
+			},
+			buf -> new PlaybackSecretsData(
+				BlockPos.STREAM_CODEC.decode(buf),
+				buf.readVarInt(),
+				buf.readUtf(MAX_SECRET_URL),
+				buf.readUtf(MAX_SECRET_URL),
+				buf.readUtf(MAX_SECRET_URL),
+				buf.readUtf(MAX_SECRET_URL)
+			)
+		);
+
+		public boolean isDenied() {
+			return this.streamUrl.isEmpty();
+		}
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
+	public record OpenPosterPicker(BlockPos pos) implements CustomPacketPayload {
+		public static final Type<OpenPosterPicker> TYPE = new Type<>(PixelReel.id("open_poster_picker"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, OpenPosterPicker> CODEC = StreamCodec.composite(
+			BlockPos.STREAM_CODEC, OpenPosterPicker::pos, OpenPosterPicker::new
+		);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
+	public record SetPosterArtwork(BlockPos pos, PosterArt art) implements CustomPacketPayload {
+		public static final Type<SetPosterArtwork> TYPE = new Type<>(PixelReel.id("set_poster_artwork"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, SetPosterArtwork> CODEC = StreamCodec.composite(
+			BlockPos.STREAM_CODEC,
+			SetPosterArtwork::pos,
+			PosterArt.STREAM_CODEC,
+			SetPosterArtwork::art,
+			SetPosterArtwork::new
+		);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
+	public record UploadPosterChunk(
+		BlockPos pos,
+		String uploadId,
+		String fileName,
+		int totalBytes,
+		int offset,
+		byte[] data
+	) implements CustomPacketPayload {
+		public static final Type<UploadPosterChunk> TYPE = new Type<>(PixelReel.id("upload_poster_chunk"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, UploadPosterChunk> CODEC = StreamCodec.of(
+			(buf, value) -> {
+				BlockPos.STREAM_CODEC.encode(buf, value.pos);
+				buf.writeUtf(value.uploadId, 64);
+				buf.writeUtf(value.fileName, 128);
+				buf.writeVarInt(value.totalBytes);
+				buf.writeVarInt(value.offset);
+				buf.writeVarInt(value.data.length);
+				buf.writeBytes(value.data);
+			},
+			buf -> {
+				BlockPos pos = BlockPos.STREAM_CODEC.decode(buf);
+				String uploadId = buf.readUtf(64);
+				String fileName = buf.readUtf(128);
+				int totalBytes = buf.readVarInt();
+				int offset = buf.readVarInt();
+				int length = buf.readVarInt();
+				byte[] data = new byte[Math.clamp(length, 0, com.pixelreel.poster.CustomPosterStore.CHUNK_BYTES)];
+				buf.readBytes(data);
+				return new UploadPosterChunk(pos, uploadId, fileName, totalBytes, offset, data);
+			}
+		);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
+	public record RequestCustomPoster(String id) implements CustomPacketPayload {
+		public static final Type<RequestCustomPoster> TYPE = new Type<>(PixelReel.id("request_custom_poster"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, RequestCustomPoster> CODEC = StreamCodec.composite(
+			ByteBufCodecs.stringUtf8(64),
+			RequestCustomPoster::id,
+			RequestCustomPoster::new
+		);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
+	public record CustomPosterChunk(
+		String id,
+		int totalBytes,
+		int offset,
+		byte[] data
+	) implements CustomPacketPayload {
+		public static final Type<CustomPosterChunk> TYPE = new Type<>(PixelReel.id("custom_poster_chunk"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, CustomPosterChunk> CODEC = StreamCodec.of(
+			(buf, value) -> {
+				buf.writeUtf(value.id, 64);
+				buf.writeVarInt(value.totalBytes);
+				buf.writeVarInt(value.offset);
+				buf.writeVarInt(value.data.length);
+				buf.writeBytes(value.data);
+			},
+			buf -> {
+				String id = buf.readUtf(64);
+				int totalBytes = buf.readVarInt();
+				int offset = buf.readVarInt();
+				int length = buf.readVarInt();
+				byte[] data = new byte[Math.clamp(length, 0, com.pixelreel.poster.CustomPosterStore.CHUNK_BYTES)];
+				buf.readBytes(data);
+				return new CustomPosterChunk(id, totalBytes, offset, data);
+			}
+		);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
 	}
 
 	public record ChannelList(LiveStatus status, List<ChannelEntry> entries) implements CustomPacketPayload {

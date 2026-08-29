@@ -15,7 +15,10 @@ import com.pixelreel.ondemand.OnDemandCatalog;
 import com.pixelreel.ondemand.OnDemandProvider;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -284,7 +287,11 @@ public final class ScreenControllerLogic {
 		}
 		BlockPos pos = display.getBlockPos().immutable();
 		var level = display.getLevel();
-		OnDemandCatalog.fetchItem(provider, itemId).thenCompose(optionalItem -> {
+		Optional<JellyfinItemSummary> cached = OnDemandCatalog.find(provider, itemId);
+		CompletableFuture<Optional<JellyfinItemSummary>> itemFuture = cached.isPresent()
+			? CompletableFuture.completedFuture(cached)
+			: OnDemandCatalog.fetchItem(provider, itemId);
+		itemFuture.thenCompose(optionalItem -> {
 			if (optionalItem.isEmpty()) {
 				return java.util.concurrent.CompletableFuture.completedFuture(Optional.<ResolvedPlay>empty());
 			}
@@ -309,6 +316,7 @@ public final class ScreenControllerLogic {
 					pos.toShortString(),
 					error == null ? "item or stream unavailable" : error.toString()
 				);
+				notifyActorUnavailable(server, actor, provider.displayName());
 				return;
 			}
 			ResolvedPlay resolved = resolvedOpt.get();
@@ -349,6 +357,42 @@ public final class ScreenControllerLogic {
 				pos.toShortString(),
 				playback.subtitles() == null ? 0 : playback.subtitles().size()
 			);
+		}));
+	}
+
+	/**
+	 * Rebuilds the stream URL that {@code saveAdditional} deliberately left out of the world save. Tokens and
+	 * play sessions expire anyway, so a fresh resolve is also more reliable than a stored one would have been.
+	 */
+	public static void restoreStreamAfterLoad(DisplayBlockEntity display) {
+		if (!display.isPowered() || display.isSuspended() || !display.getStreamUrl().isEmpty()) {
+			return;
+		}
+		if (display.isOnDemand()) {
+			String itemId = display.getJellyfinItemId();
+			if (!itemId.isEmpty()) {
+				playOnDemandItem(
+					display, display.onDemandProvider(), itemId, display.currentPlaybackPositionMs(), display.getControllingPlayer()
+				);
+			}
+			return;
+		}
+		String channelId = display.getChannelId();
+		if (channelId.isEmpty()) {
+			return;
+		}
+		MinecraftServer server = display.getLevel() == null ? null : display.getLevel().getServer();
+		if (server == null) {
+			return;
+		}
+		BlockPos pos = display.getBlockPos().immutable();
+		ServerLevel level = display.getLevel() instanceof ServerLevel serverLevel ? serverLevel : null;
+		ChannelService.INSTANCE.channels(false).whenComplete((channels, error) -> server.execute(() -> {
+			DisplayBlockEntity current = level == null ? null : DisplayBlock.displayAt(level, pos);
+			if (current == null || !current.getStreamUrl().isEmpty()) {
+				return;
+			}
+			ChannelService.INSTANCE.resolve(channelId).ifPresent(current::tuneTo);
 		}));
 	}
 
@@ -452,6 +496,22 @@ public final class ScreenControllerLogic {
 			}
 		}
 		return -1;
+	}
+
+	private static void notifyActorUnavailable(MinecraftServer server, @Nullable String actor, String providerName) {
+		if (actor == null || actor.isBlank()) {
+			return;
+		}
+		for (ServerPlayer online : server.getPlayerList().getPlayers()) {
+			if (online.getGameProfile().getName().equalsIgnoreCase(actor)) {
+				online.sendSystemMessage(Component.translatable("message.pixelreel.ondemand.item_unavailable").withStyle(ChatFormatting.RED));
+				online.sendSystemMessage(
+					Component.literal(providerName + " timed out or failed — check reachability, or raise networkTimeoutSeconds in config/pixelreel.json")
+						.withStyle(ChatFormatting.GRAY)
+				);
+				return;
+			}
+		}
 	}
 
 	private record ResolvedPlay(JellyfinItemSummary item, OnDemandCatalog.PlaybackStart playback, long startMs) {

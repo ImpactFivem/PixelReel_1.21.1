@@ -45,11 +45,27 @@ public final class PixelReelConfig {
 	public String permissionPlayJellyfinMovies = "everyone";
 	public String permissionPlayJellyfinShows = "everyone";
 	public String permissionControlPlayback = "everyone";
+	public String permissionPlacePosters = "everyone";
 	public String permissionConfigureTunarr = "op";
 	public String permissionConfigureJellyfin = "op";
 	public String permissionConfigureEmby = "op";
 	public String permissionConfigurePlex = "op";
 	public String permissionRefreshLibrary = "op";
+	/**
+	 * Who receives the raw stream URL. A client cannot decode video without connecting straight to the
+	 * media server, so anyone in this list learns its address. Narrow it on public servers.
+	 */
+	public String permissionWatch = "everyone";
+	/** Who may hang a poster pointing at an arbitrary web address. */
+	public String permissionCustomPosterUrls = "everyone";
+	/** Who may see media-server hosts in status output and error text. */
+	public String permissionSeeMediaHosts = "op";
+
+	/**
+	 * Hosts custom poster URLs may point at. Empty means any public host. Entries match the host itself
+	 * plus its subdomains, e.g. "image.tmdb.org" or "imgur.com".
+	 */
+	public List<String> posterUrlHostAllowlist = new ArrayList<>();
 
 	public double globalTvVolume = 1.5;
 
@@ -64,7 +80,26 @@ public final class PixelReelConfig {
 
 	public double defaultDisplayVolume = 1.0;
 
-	public int networkTimeoutSeconds = 10;
+	/** Default room zone for `/tv zone here` (blocks). Tunable in config/pixelreel.json. */
+	public int audioZoneDefaultWidth = 30;
+	public int audioZoneDefaultDepth = 35;
+	public int audioZoneDefaultHeight = 12;
+	/** Soft fade width at zone edges (blocks). 0 = full volume anywhere inside (recommended for theaters). */
+	public double audioZoneEdgeFadeBlocks = 0.0;
+	public String permissionConfigureAudioZone = "op";
+
+	public int networkTimeoutSeconds = 20;
+	/**
+	 * HTTP port clients use to fetch video and artwork without ever seeing an API key. 0 picks an
+	 * ephemeral port. Dedicated servers must open this port next to 25565.
+	 */
+	public int mediaProxyPort = 25567;
+	/**
+	 * Hostname clients should use for the proxy. Empty means each client uses the same host it used
+	 * to reach Minecraft (rewriting {@code pixelreel.invalid}). Set this when that host is not reachable
+	 * on the proxy port (NAT, reverse proxy, etc.).
+	 */
+	public String mediaProxyPublicHost = "";
 	public int streamCachingMillis = 3000;
 	public int streamReconnectAttempts = 5;
 	public int channelCacheSeconds = 300;
@@ -112,11 +147,21 @@ public final class PixelReelConfig {
 		copy.permissionPlayJellyfinMovies = normalizePermission(this.permissionPlayJellyfinMovies, "everyone");
 		copy.permissionPlayJellyfinShows = normalizePermission(this.permissionPlayJellyfinShows, "everyone");
 		copy.permissionControlPlayback = normalizePermission(this.permissionControlPlayback, "everyone");
+		copy.permissionPlacePosters = normalizePermission(this.permissionPlacePosters, "everyone");
 		copy.permissionConfigureTunarr = normalizePermission(this.permissionConfigureTunarr, "op");
 		copy.permissionConfigureJellyfin = normalizePermission(this.permissionConfigureJellyfin, "op");
 		copy.permissionConfigureEmby = normalizePermission(this.permissionConfigureEmby, "op");
 		copy.permissionConfigurePlex = normalizePermission(this.permissionConfigurePlex, "op");
 		copy.permissionRefreshLibrary = normalizePermission(this.permissionRefreshLibrary, "op");
+		copy.permissionWatch = normalizePermission(this.permissionWatch, "everyone");
+		copy.permissionCustomPosterUrls = normalizePermission(this.permissionCustomPosterUrls, "everyone");
+		copy.permissionSeeMediaHosts = normalizePermission(this.permissionSeeMediaHosts, "op");
+		copy.posterUrlHostAllowlist = this.posterUrlHostAllowlist == null
+			? new ArrayList<>()
+			: new ArrayList<>(this.posterUrlHostAllowlist.stream()
+				.filter(host -> host != null && !host.isBlank())
+				.map(host -> host.trim().toLowerCase(java.util.Locale.ROOT))
+				.toList());
 		copy.globalTvVolume = clamp(this.globalTvVolume, 0.0, 2.0, 1.5);
 		copy.maxSimultaneousChannels = clamp(this.maxSimultaneousChannels, 1, 4, 2);
 		copy.artworkCacheLocation = this.artworkCacheLocation == null || this.artworkCacheLocation.isBlank()
@@ -127,7 +172,14 @@ public final class PixelReelConfig {
 		copy.prewarmLimit = clamp(this.prewarmLimit, 0, 4, 1);
 		copy.warmPlayerTimeoutSeconds = clamp(this.warmPlayerTimeoutSeconds, 5, 600, 20);
 		copy.defaultDisplayVolume = clamp(this.defaultDisplayVolume, 0.0, 1.0, 1.0);
-		copy.networkTimeoutSeconds = clamp(this.networkTimeoutSeconds, 1, 120, 10);
+		copy.audioZoneDefaultWidth = clamp(this.audioZoneDefaultWidth, 1, 256, 30);
+		copy.audioZoneDefaultDepth = clamp(this.audioZoneDefaultDepth, 1, 256, 35);
+		copy.audioZoneDefaultHeight = clamp(this.audioZoneDefaultHeight, 1, 64, 12);
+		copy.audioZoneEdgeFadeBlocks = clamp(this.audioZoneEdgeFadeBlocks, 0.0, 8.0, 0.0);
+		copy.permissionConfigureAudioZone = normalizePermission(this.permissionConfigureAudioZone, "op");
+		copy.networkTimeoutSeconds = clamp(this.networkTimeoutSeconds, 1, 120, 20);
+		copy.mediaProxyPort = this.mediaProxyPort <= 0 ? 0 : clamp(this.mediaProxyPort, 1, 65535, 25567);
+		copy.mediaProxyPublicHost = this.mediaProxyPublicHost == null ? "" : this.mediaProxyPublicHost.trim();
 		copy.streamCachingMillis = clamp(this.streamCachingMillis, 0, 10000, 3000);
 		copy.streamReconnectAttempts = clamp(this.streamReconnectAttempts, 0, 20, 5);
 		copy.channelCacheSeconds = clamp(this.channelCacheSeconds, 5, 86400, 300);

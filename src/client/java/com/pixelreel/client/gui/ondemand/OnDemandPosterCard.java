@@ -14,9 +14,9 @@ import net.minecraft.network.chat.Component;
 
 /** getting Posters card from selected provider like Jellyfin, Emby, Plex. */
 public class OnDemandPosterCard extends AbstractWidget {
-	static final int CARD_WIDTH = 78;
-	static final int POSTER_HEIGHT = 110;
-	static final int CARD_HEIGHT = POSTER_HEIGHT + 28;
+	public static final int CARD_WIDTH = 78;
+	public static final int POSTER_HEIGHT = 110;
+	public static final int CARD_HEIGHT = POSTER_HEIGHT + 28;
 
 	private static final int COLOR_CARD = 0xE0101418;
 	private static final int COLOR_CARD_HOVER = 0xE01C242C;

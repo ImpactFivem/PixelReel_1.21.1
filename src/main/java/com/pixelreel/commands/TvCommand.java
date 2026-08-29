@@ -5,35 +5,45 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import com.pixelreel.audio.AudioZone;
+import com.pixelreel.audio.AudioZoneClaimSessions;
 import com.pixelreel.blockentities.DisplayBlockEntity;
 import com.pixelreel.blocks.DisplayBlock;
+import com.pixelreel.blocks.DisplayType;
 import com.pixelreel.channels.Channel;
 import com.pixelreel.channels.ChannelService;
 import com.pixelreel.channels.GuideInfo;
+import com.pixelreel.config.ConfigManager;
+import com.pixelreel.config.PixelReelConfig;
 import com.pixelreel.jellyfin.JellyfinService;
 import com.pixelreel.jellyfin.JellyfinStatus;
 import com.pixelreel.networking.ModNetworkPayloads;
 import com.pixelreel.networking.ScreenAction;
 import com.pixelreel.networking.ServerNetworking;
 import com.pixelreel.permissions.CinemaPermissions;
+import com.pixelreel.poster.MediaHosts;
 import com.pixelreel.server.ScreenControllerLogic;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.HoverEvent;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -71,6 +81,17 @@ public final class TvCommand {
 			.then(Commands.literal("volume")
 				.then(Commands.argument("percent", IntegerArgumentType.integer(0, 100)).executes(TvCommand::volume)))
 			.then(Commands.literal("rebuild").executes(TvCommand::rebuild))
+			.then(Commands.literal("zone")
+				.then(Commands.literal("claim").executes(TvCommand::zoneClaim))
+				.then(Commands.literal("start").executes(TvCommand::zoneClaim))
+				.then(Commands.literal("mark").executes(TvCommand::zoneMark))
+				.then(Commands.literal("cancel").executes(TvCommand::zoneCancel))
+				.then(Commands.literal("set")
+					.then(Commands.argument("from", BlockPosArgument.blockPos())
+						.then(Commands.argument("to", BlockPosArgument.blockPos()).executes(TvCommand::zoneSet))))
+				.then(Commands.literal("clear").executes(TvCommand::zoneClear))
+				.then(Commands.literal("here").executes(TvCommand::zoneHere))
+				.then(Commands.literal("status").executes(TvCommand::zoneStatus)))
 			.then(Commands.literal("jellyfin")
 				.then(Commands.literal("status").executes(TvCommand::jellyfinStatus))
 				.then(Commands.literal("refresh").executes(TvCommand::jellyfinRefresh))
@@ -81,9 +102,8 @@ public final class TvCommand {
 
 	private static int menu(CommandContext<CommandSourceStack> context) {
 		CommandSourceStack source = context.getSource();
-		ServerPlayer player = source.getPlayer();
+		ServerPlayer player = permitted(source, p -> CinemaPermissions.canBrowse(p) || CinemaPermissions.canPlayTunarr(p));
 		if (player == null) {
-			source.sendFailure(Component.translatable("command.pixelreel.players_only"));
 			return 0;
 		}
 		DisplayBlockEntity display = lookedAtDisplay(source);
@@ -97,6 +117,9 @@ public final class TvCommand {
 
 	private static int channels(CommandContext<CommandSourceStack> context) {
 		CommandSourceStack source = context.getSource();
+		if (!isTrustedSource(source) && permitted(source, CinemaPermissions::canBrowse) == null) {
+			return 0;
+		}
 		MinecraftServer server = source.getServer();
 		ChannelService.INSTANCE.channels(false).whenComplete((channels, error) -> server.execute(() -> {
 			if (channels == null || channels.isEmpty()) {
@@ -132,6 +155,10 @@ public final class TvCommand {
 
 	private static int channel(CommandContext<CommandSourceStack> context) {
 		CommandSourceStack source = context.getSource();
+		if (!isTrustedSource(source)
+			&& permitted(source, p -> CinemaPermissions.canPlayTunarr(p) && CinemaPermissions.canChangeContent(p)) == null) {
+			return 0;
+		}
 		String query = StringArgumentType.getString(context, "channel").trim();
 		DisplayBlockEntity display = lookedAtDisplay(source);
 		if (display == null) {
@@ -174,6 +201,9 @@ public final class TvCommand {
 
 	private static int control(CommandContext<CommandSourceStack> context, ScreenAction action) {
 		CommandSourceStack source = context.getSource();
+		if (!isTrustedSource(source) && permitted(source, p -> CinemaPermissions.canPerform(p, action)) == null) {
+			return 0;
+		}
 		DisplayBlockEntity display = lookedAtDisplay(source);
 		if (display == null) {
 			source.sendFailure(Component.translatable("command.pixelreel.no_screen_in_sight"));
@@ -205,6 +235,10 @@ public final class TvCommand {
 
 	private static int volume(CommandContext<CommandSourceStack> context) {
 		CommandSourceStack source = context.getSource();
+		if (!isTrustedSource(source)
+			&& permitted(source, p -> CinemaPermissions.canPerform(p, ScreenAction.VOLUME_SET)) == null) {
+			return 0;
+		}
 		int percent = IntegerArgumentType.getInteger(context, "percent");
 		DisplayBlockEntity display = lookedAtDisplay(source);
 		if (display == null) {
@@ -218,6 +252,9 @@ public final class TvCommand {
 
 	private static int guide(CommandContext<CommandSourceStack> context) {
 		CommandSourceStack source = context.getSource();
+		if (!isTrustedSource(source) && permitted(source, CinemaPermissions::canBrowse) == null) {
+			return 0;
+		}
 		MinecraftServer server = source.getServer();
 		ChannelService.INSTANCE.channels(false).whenComplete((channels, error) -> server.execute(() -> {
 			if (channels == null || channels.isEmpty()) {
@@ -266,13 +303,15 @@ public final class TvCommand {
 
 	private static int status(CommandContext<CommandSourceStack> context) {
 		CommandSourceStack source = context.getSource();
+		boolean showHosts = maySeeHosts(source);
 		DisplayBlockEntity display = lookedAtDisplay(source);
 		if (display == null) {
 			var status = ChannelService.INSTANCE.lastStatus();
 			if (status.reachable()) {
 				source.sendSuccess(() -> Component.translatable("command.pixelreel.status.source_online", status.channelCount()).withStyle(ChatFormatting.GREEN), false);
 			} else {
-				source.sendSuccess(() -> Component.translatable("command.pixelreel.status.source_offline", status.detail()).withStyle(ChatFormatting.RED), false);
+				String detail = showHosts ? status.detail() : MediaHosts.redact(status.detail());
+				source.sendSuccess(() -> Component.translatable("command.pixelreel.status.source_offline", detail).withStyle(ChatFormatting.RED), false);
 			}
 			source.sendSuccess(() -> Component.translatable("command.pixelreel.no_screen_in_sight").withStyle(ChatFormatting.GRAY), false);
 			return 1;
@@ -291,7 +330,11 @@ public final class TvCommand {
 				() -> statusLine("command.pixelreel.status.channel", Component.literal(display.getChannelNumber() + " - " + display.getChannelName())), false
 			);
 			source.sendSuccess(
-				() -> statusLine("command.pixelreel.status.stream_host", Component.literal(ChannelService.hostOnly(display.getStreamUrl()))), false
+				() -> statusLine(
+					"command.pixelreel.status.stream_host",
+					Component.literal(MediaHosts.visibleHost(display.getStreamUrl(), showHosts))
+				),
+				false
 			);
 			GuideInfo guide = ChannelService.INSTANCE.guideFor(display.getChannelId());
 			if (guide.hasNow()) {
@@ -301,11 +344,225 @@ public final class TvCommand {
 			source.sendSuccess(() -> statusLine("command.pixelreel.status.channel", Component.translatable("command.pixelreel.status.no_channel")), false);
 		}
 		source.sendSuccess(() -> statusLine("command.pixelreel.status.volume", Component.literal(Math.round(display.getVolume() * 100.0F) + "%")), false);
+		if (display.hasAudioZone()) {
+			AudioZone zone = display.getAudioZone();
+			source.sendSuccess(
+				() -> statusLine(
+					"command.pixelreel.status.audio_zone",
+					Component.literal(zone.sizeLabel() + " · " + zone.describe())
+				),
+				false
+			);
+		} else {
+			source.sendSuccess(
+				() -> statusLine("command.pixelreel.status.audio_zone", Component.translatable("command.pixelreel.zone.none")),
+				false
+			);
+		}
 
 		ServerPlayer player = source.getPlayer();
 		if (player != null) {
 			ServerPlayNetworking.send(player, new ModNetworkPayloads.ShowClientStatus(display.getBlockPos()));
 		}
+		return 1;
+	}
+
+	private static int zoneClaim(CommandContext<CommandSourceStack> context) {
+		CommandSourceStack source = context.getSource();
+		ServerPlayer player = source.getPlayer();
+		if (player == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.players_only"));
+			return 0;
+		}
+		if (!CinemaPermissions.canConfigureAudioZone(player)) {
+			source.sendFailure(Component.translatable("command.pixelreel.no_permission"));
+			return 0;
+		}
+		DisplayBlockEntity display = lookedAtDisplay(source);
+		if (display == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.no_screen_in_sight"));
+			return 0;
+		}
+		AudioZoneClaimSessions.cancel(player, false);
+		AudioZoneClaimSessions.start(player, display);
+		return 1;
+	}
+
+	private static int zoneMark(CommandContext<CommandSourceStack> context) {
+		CommandSourceStack source = context.getSource();
+		ServerPlayer player = source.getPlayer();
+		if (player == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.players_only"));
+			return 0;
+		}
+		if (!CinemaPermissions.canConfigureAudioZone(player)) {
+			source.sendFailure(Component.translatable("command.pixelreel.no_permission"));
+			return 0;
+		}
+		if (!AudioZoneClaimSessions.isClaiming(player)) {
+			source.sendFailure(Component.translatable("command.pixelreel.zone.claim.not_active"));
+			return 0;
+		}
+		BlockPos pos = lookedAtBlock(source);
+		if (pos == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.zone.claim.look_at_block"));
+			return 0;
+		}
+		return AudioZoneClaimSessions.mark(player, pos) ? 1 : 0;
+	}
+
+	private static int zoneCancel(CommandContext<CommandSourceStack> context) {
+		CommandSourceStack source = context.getSource();
+		ServerPlayer player = source.getPlayer();
+		if (player == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.players_only"));
+			return 0;
+		}
+		if (!AudioZoneClaimSessions.isClaiming(player)) {
+			source.sendFailure(Component.translatable("command.pixelreel.zone.claim.not_active"));
+			return 0;
+		}
+		AudioZoneClaimSessions.cancel(player, true);
+		return 1;
+	}
+
+	private static int zoneSet(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+		CommandSourceStack source = context.getSource();
+		ServerPlayer player = source.getPlayer();
+		if (player == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.players_only"));
+			return 0;
+		}
+		if (!CinemaPermissions.canConfigureAudioZone(player)) {
+			source.sendFailure(Component.translatable("command.pixelreel.no_permission"));
+			return 0;
+		}
+		DisplayBlockEntity display = lookedAtDisplay(source);
+		if (display == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.no_screen_in_sight"));
+			return 0;
+		}
+		AudioZoneClaimSessions.cancel(player, false);
+		BlockPos from = BlockPosArgument.getLoadedBlockPos(context, "from");
+		BlockPos to = BlockPosArgument.getLoadedBlockPos(context, "to");
+		AudioZone zone = AudioZone.of(from, to);
+		display.setAudioZone(zone);
+		AudioZoneClaimSessions.outlineZone(player.serverLevel(), zone);
+		source.sendSuccess(
+			() -> Component.translatable("command.pixelreel.zone.set", zone.sizeLabel(), zone.describe()).withStyle(ChatFormatting.GREEN),
+			true
+		);
+		return 1;
+	}
+
+	private static int zoneClear(CommandContext<CommandSourceStack> context) {
+		CommandSourceStack source = context.getSource();
+		ServerPlayer player = source.getPlayer();
+		if (player == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.players_only"));
+			return 0;
+		}
+		if (!CinemaPermissions.canConfigureAudioZone(player)) {
+			source.sendFailure(Component.translatable("command.pixelreel.no_permission"));
+			return 0;
+		}
+		DisplayBlockEntity display = lookedAtDisplay(source);
+		if (display == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.no_screen_in_sight"));
+			return 0;
+		}
+		AudioZoneClaimSessions.cancel(player, false);
+		display.clearAudioZone();
+		source.sendSuccess(() -> Component.translatable("command.pixelreel.zone.cleared").withStyle(ChatFormatting.YELLOW), true);
+		return 1;
+	}
+
+	private static int zoneHere(CommandContext<CommandSourceStack> context) {
+		CommandSourceStack source = context.getSource();
+		ServerPlayer player = source.getPlayer();
+		if (player == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.players_only"));
+			return 0;
+		}
+		if (!CinemaPermissions.canConfigureAudioZone(player)) {
+			source.sendFailure(Component.translatable("command.pixelreel.no_permission"));
+			return 0;
+		}
+		DisplayBlockEntity display = lookedAtDisplay(source);
+		if (display == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.no_screen_in_sight"));
+			return 0;
+		}
+		PixelReelConfig config = ConfigManager.get();
+		DisplayType type = display.type();
+		AudioZone zone = AudioZone.fromScreen(
+			display.getBlockPos(),
+			display.facing(),
+			type.controllerColumn(),
+			type.widthBlocks(),
+			config.audioZoneDefaultWidth,
+			config.audioZoneDefaultDepth,
+			config.audioZoneDefaultHeight
+		);
+		AudioZoneClaimSessions.cancel(player, false);
+		display.setAudioZone(zone);
+		AudioZoneClaimSessions.outlineZone(player.serverLevel(), zone);
+		source.sendSuccess(
+			() -> Component.translatable(
+				"command.pixelreel.zone.here",
+				config.audioZoneDefaultWidth,
+				config.audioZoneDefaultDepth,
+				config.audioZoneDefaultHeight,
+				zone.describe()
+			).withStyle(ChatFormatting.YELLOW),
+			true
+		);
+		source.sendSuccess(
+			() -> Component.translatable("command.pixelreel.zone.here_hint").withStyle(ChatFormatting.GRAY),
+			false
+		);
+		return 1;
+	}
+
+	private static int zoneStatus(CommandContext<CommandSourceStack> context) {
+		CommandSourceStack source = context.getSource();
+		ServerPlayer player = source.getPlayer();
+		if (player != null && AudioZoneClaimSessions.isClaiming(player)) {
+			source.sendSuccess(
+				() -> Component.translatable("command.pixelreel.zone.claim.in_progress").withStyle(ChatFormatting.AQUA),
+				false
+			);
+		}
+		DisplayBlockEntity display = lookedAtDisplay(source);
+		if (display == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.no_screen_in_sight"));
+			return 0;
+		}
+		PixelReelConfig config = ConfigManager.get();
+		if (display.hasAudioZone()) {
+			AudioZone zone = display.getAudioZone();
+			source.sendSuccess(
+				() -> Component.translatable("command.pixelreel.zone.status.set", zone.sizeLabel(), zone.describe())
+					.withStyle(ChatFormatting.AQUA),
+				false
+			);
+			AudioZoneClaimSessions.outlineZone(source.getLevel() instanceof ServerLevel serverLevel ? serverLevel : null, zone);
+		} else {
+			source.sendSuccess(
+				() -> Component.translatable("command.pixelreel.zone.status.unset").withStyle(ChatFormatting.GRAY),
+				false
+			);
+		}
+		source.sendSuccess(
+			() -> Component.translatable(
+				"command.pixelreel.zone.status.defaults",
+				config.audioZoneDefaultWidth,
+				config.audioZoneDefaultDepth,
+				config.audioZoneDefaultHeight,
+				config.audioZoneEdgeFadeBlocks
+			).withStyle(ChatFormatting.DARK_GRAY),
+			false
+		);
 		return 1;
 	}
 
@@ -315,9 +572,8 @@ public final class TvCommand {
 
 	private static int retry(CommandContext<CommandSourceStack> context) {
 		CommandSourceStack source = context.getSource();
-		ServerPlayer player = source.getPlayer();
+		ServerPlayer player = permitted(source, CinemaPermissions::canWatch);
 		if (player == null) {
-			source.sendFailure(Component.translatable("command.pixelreel.players_only"));
 			return 0;
 		}
 		DisplayBlockEntity display = lookedAtDisplay(source);
@@ -332,6 +588,9 @@ public final class TvCommand {
 
 	private static int reload(CommandContext<CommandSourceStack> context) {
 		CommandSourceStack source = context.getSource();
+		if (!isTrustedSource(source) && permitted(source, CinemaPermissions::canRefreshLibrary) == null) {
+			return 0;
+		}
 		MinecraftServer server = source.getServer();
 		source.sendSuccess(() -> Component.translatable("command.pixelreel.reload.started"), false);
 		ChannelService.INSTANCE.channels(true).whenComplete((channels, error) -> server.execute(() -> {
@@ -350,18 +609,24 @@ public final class TvCommand {
 	private static int jellyfinStatus(CommandContext<CommandSourceStack> context) {
 		CommandSourceStack source = context.getSource();
 		JellyfinStatus status = JellyfinService.INSTANCE.lastStatus();
+		String detail = maySeeHosts(source) ? status.detail() : MediaHosts.redact(status.detail());
 		source.sendSuccess(
 			() -> Component.translatable(
 				"command.pixelreel.jellyfin.status",
 				status.configured()
 					? (status.authenticated()
-						? status.movieCount() + " movies / " + status.seriesCount() + " shows — " + status.detail()
-						: status.detail())
+						? status.movieCount() + " movies / " + status.seriesCount() + " shows — " + detail
+						: detail)
 					: "not configured"
 			).withStyle(status.authenticated() ? ChatFormatting.GREEN : ChatFormatting.RED),
 			false
 		);
 		return 1;
+	}
+
+	private static boolean maySeeHosts(CommandSourceStack source) {
+		ServerPlayer player = source.getPlayer();
+		return player == null ? source.hasPermission(Commands.LEVEL_GAMEMASTERS) : CinemaPermissions.canSeeMediaHosts(player);
 	}
 
 	private static int jellyfinRefresh(CommandContext<CommandSourceStack> context) {
@@ -414,6 +679,9 @@ public final class TvCommand {
 
 	private static int rebuild(CommandContext<CommandSourceStack> context) {
 		CommandSourceStack source = context.getSource();
+		if (!isTrustedSource(source) && permitted(source, CinemaPermissions::canControlPlayback) == null) {
+			return 0;
+		}
 		DisplayBlockEntity display = lookedAtDisplay(source);
 		if (display == null) {
 			source.sendFailure(Component.translatable("command.pixelreel.no_screen_in_sight"));
@@ -429,6 +697,27 @@ public final class TvCommand {
 		return 1;
 	}
 
+	/**
+	 * Returns the executing player once {@code check} passes, otherwise reports the failure and returns null.
+	 * Console and command blocks are treated as fully trusted.
+	 */
+	private static @Nullable ServerPlayer permitted(CommandSourceStack source, Predicate<ServerPlayer> check) {
+		ServerPlayer player = source.getPlayer();
+		if (player == null) {
+			source.sendFailure(Component.translatable("command.pixelreel.players_only"));
+			return null;
+		}
+		if (!check.test(player)) {
+			source.sendFailure(Component.translatable("command.pixelreel.no_permission"));
+			return null;
+		}
+		return player;
+	}
+
+	private static boolean isTrustedSource(CommandSourceStack source) {
+		return source.getPlayer() == null && source.hasPermission(Commands.LEVEL_GAMEMASTERS);
+	}
+
 	private static @Nullable DisplayBlockEntity lookedAtDisplay(CommandSourceStack source) {
 		ServerPlayer player = source.getPlayer();
 		if (player == null) {
@@ -437,6 +726,18 @@ public final class TvCommand {
 		HitResult hit = player.pick(48.0, 1.0F, false);
 		if (hit instanceof BlockHitResult blockHit && hit.getType() == HitResult.Type.BLOCK) {
 			return DisplayBlock.controllerAt(player.level(), blockHit.getBlockPos());
+		}
+		return null;
+	}
+
+	private static @Nullable BlockPos lookedAtBlock(CommandSourceStack source) {
+		ServerPlayer player = source.getPlayer();
+		if (player == null) {
+			return null;
+		}
+		HitResult hit = player.pick(48.0, 1.0F, false);
+		if (hit instanceof BlockHitResult blockHit && hit.getType() == HitResult.Type.BLOCK) {
+			return blockHit.getBlockPos();
 		}
 		return null;
 	}

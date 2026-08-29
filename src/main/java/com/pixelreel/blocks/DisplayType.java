@@ -6,7 +6,8 @@ public enum DisplayType {
 	WALL_TELEVISION("wall_television", 6, 4, 2, 0.0F, 0.0F, 96.0F, 64.0F, 1.0F, 0.0F, 1, 24.0F),
 	ULTRAWIDE_MONITOR("ultrawide_monitor", 8, 4, 3, 0.0F, 0.0F, 128.0F, 64.0F, 1.0F, 0.0F, 1, 24.0F),
 	CINEMA_SCREEN("cinema_screen", 14, 8, 6, 0.0F, 0.0F, 224.0F, 128.0F, 1.0F, 0.0F, 1, 80.0F),
-	CURVED_CINEMA_SCREEN("curved_cinema_screen", 16, 7, 7, 0.0F, 0.0F, 256.0F, 112.0F, 15.2F, 22.0F, 32, 80.0F);
+	CURVED_CINEMA_SCREEN("curved_cinema_screen", 16, 7, 7, 0.0F, 0.0F, 256.0F, 112.0F, 15.2F, 22.0F, 32, 80.0F),
+	GIANT_CINEMA_SCREEN("giant_cinema_screen", 20, 10, 9, 0.0F, 0.0F, 320.0F, 160.0F, 15.2F, 5.0F, 28, 100.0F);
 
 	private final String id;
 	private final int widthBlocks;
@@ -110,7 +111,7 @@ public enum DisplayType {
 	}
 
 	public boolean isCinema() {
-		return this == CINEMA_SCREEN || this == CURVED_CINEMA_SCREEN;
+		return this == CINEMA_SCREEN || this == CURVED_CINEMA_SCREEN || this == GIANT_CINEMA_SCREEN;
 	}
 
 	public float audioRange() {

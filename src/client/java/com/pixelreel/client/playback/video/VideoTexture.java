@@ -43,8 +43,8 @@ public final class VideoTexture implements AutoCloseable {
 		this.textureId = PixelReel.id("video/stream_" + nextId++);
 	}
 
-	public void forceHdrToneMap() {
-		this.hdrToneMapper.forceOn();
+	public void setToneMapMode(ToneMapMode mode) {
+		this.hdrToneMapper.setMode(mode);
 	}
 
 	public ResourceLocation textureId() {

@@ -1,9 +1,11 @@
 package com.pixelreel;
 
+import com.pixelreel.audio.AudioZoneClaimSessions;
 import com.pixelreel.channels.ChannelService;
 import com.pixelreel.commands.TvCommand;
 import com.pixelreel.config.ConfigManager;
 import com.pixelreel.networking.ModNetworkPayloads;
+import com.pixelreel.networking.PlaybackSecrets;
 import com.pixelreel.networking.ServerNetworking;
 import com.pixelreel.ondemand.OnDemandCatalog;
 import com.pixelreel.registry.ModBlockEntities;
@@ -12,6 +14,7 @@ import com.pixelreel.registry.ModCreativeTabs;
 import com.pixelreel.registry.ModItems;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.resources.ResourceLocation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,12 +33,18 @@ public class PixelReel implements ModInitializer {
 		ModNetworkPayloads.register();
 		ServerNetworking.register();
 		TvCommand.register();
+		AudioZoneClaimSessions.register();
+		ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> PlaybackSecrets.forget(handler.getPlayer()));
+		ServerLifecycleEvents.SERVER_STARTING.register(server -> com.pixelreel.media.MediaProxy.start());
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			LOGGER.info("pixelReel configuration file: {}", ConfigManager.path());
+			com.pixelreel.poster.CustomPosterStore.attach(server);
 			ChannelService.INSTANCE.channels(false);
 			OnDemandCatalog.refreshConfigured(false);
 		});
 		ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
+			com.pixelreel.media.MediaProxy.stop();
+			com.pixelreel.poster.CustomPosterStore.detach();
 			ChannelService.INSTANCE.invalidateCache();
 			OnDemandCatalog.invalidateAll();
 		});

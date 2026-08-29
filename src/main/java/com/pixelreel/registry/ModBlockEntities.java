@@ -3,6 +3,7 @@ package com.pixelreel.registry;
 import com.pixelreel.PixelReel;
 import com.pixelreel.blockentities.DisplayBlockEntity;
 import com.pixelreel.blockentities.ScreenPanelBlockEntity;
+import com.pixelreel.blockentities.WallPosterBlockEntity;
 import net.fabricmc.fabric.api.object.builder.v1.block.entity.FabricBlockEntityTypeBuilder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -20,6 +21,12 @@ public final class ModBlockEntities {
 		BuiltInRegistries.BLOCK_ENTITY_TYPE,
 		PixelReel.id("screen_panel"),
 		FabricBlockEntityTypeBuilder.create(ScreenPanelBlockEntity::new, ModBlocks.SCREEN_PANEL).build()
+	);
+
+	public static final BlockEntityType<WallPosterBlockEntity> WALL_POSTER = Registry.register(
+		BuiltInRegistries.BLOCK_ENTITY_TYPE,
+		PixelReel.id("wall_poster"),
+		FabricBlockEntityTypeBuilder.create(WallPosterBlockEntity::new, ModBlocks.WALL_POSTER, ModBlocks.HUGE_WALL_POSTER).build()
 	);
 
 	private ModBlockEntities() {

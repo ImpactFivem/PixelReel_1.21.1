@@ -41,6 +41,8 @@ public final class EmbyService {
 	private volatile long cacheFilledAtMillis;
 	private volatile String resolvedUserId = "";
 	private @Nullable CompletableFuture<JellyfinStatus> inFlight;
+	private volatile @Nullable java.net.http.HttpClient sharedHttp;
+	private volatile String sharedHttpKey = "";
 
 	private EmbyService() {
 	}
@@ -113,7 +115,22 @@ public final class EmbyService {
 		return Optional.ofNullable(this.itemsById.get(itemId));
 	}
 
+	public String imageUrl(String itemId) {
+		if (itemId == null || itemId.isBlank()) {
+			return "";
+		}
+		PixelReelConfig config = ConfigManager.get();
+		if (!config.isEmbyConfigured()) {
+			return "";
+		}
+		return this.client(config).imageUrl(itemId);
+	}
+
 	public CompletableFuture<Optional<JellyfinItemSummary>> fetchItem(String itemId) {
+		Optional<JellyfinItemSummary> cached = this.find(itemId);
+		if (cached.isPresent()) {
+			return CompletableFuture.completedFuture(cached);
+		}
 		return CompletableFuture.supplyAsync(() -> {
 			try {
 				PixelReelConfig config = ConfigManager.get();
@@ -455,7 +472,18 @@ public final class EmbyService {
 	}
 
 	private JellyfinClient client(PixelReelConfig config) {
-		return new JellyfinClient(JellyfinClient.createHttpClient(config, this.executor), config.embyConnection(), config.networkTimeoutSeconds);
+		String key = config.embyUrl + "\0" + config.embyApiKey + "\0" + config.networkTimeoutSeconds;
+		java.net.http.HttpClient http = this.sharedHttp;
+		if (http == null || !key.equals(this.sharedHttpKey)) {
+			synchronized (this) {
+				if (this.sharedHttp == null || !key.equals(this.sharedHttpKey)) {
+					this.sharedHttp = JellyfinClient.createHttpClient(config, this.executor);
+					this.sharedHttpKey = key;
+				}
+				http = this.sharedHttp;
+			}
+		}
+		return new JellyfinClient(http, config.embyConnection(), config.networkTimeoutSeconds);
 	}
 
 	private static List<JellyfinItemSummary> filter(List<JellyfinItemSummary> source, @Nullable String search) {

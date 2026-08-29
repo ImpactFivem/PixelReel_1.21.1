@@ -55,6 +55,7 @@ public final class VlcRuntime {
 				"--no-video-title-show",
 				"--no-snapshot-preview",
 				"--no-sub-autodetect-file",
+				"--no-repeat",
 				"--network-caching=" + caching,
 				"--live-caching=" + caching,
 				"--file-caching=" + caching,

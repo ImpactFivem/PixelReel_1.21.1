@@ -3,6 +3,7 @@ package com.pixelreel.client.playback;
 import com.pixelreel.PixelReel;
 import com.pixelreel.channels.ChannelService;
 import com.pixelreel.client.playback.subtitle.SubtitleOverlay;
+import com.pixelreel.client.playback.video.ToneMapMode;
 import com.pixelreel.client.playback.video.VideoTexture;
 import com.pixelreel.client.playback.video.VlcRuntime;
 import com.pixelreel.config.ConfigManager;
@@ -25,6 +26,8 @@ public final class ChannelPlayer implements AutoCloseable {
 	private static final long VOLUME_UPDATE_INTERVAL_MS = 250L;
 	private static final int VOLUME_CHANGE_THRESHOLD = 3;
 	private static final long SEEK_TOLERANCE_MS = 1500L;
+	private static final long END_IGNORE_AFTER_SEEK_MS = 2_500L;
+	private static final long END_NEAR_MS = 8_000L;
 
 	private final String url;
 	private final boolean onDemand;
@@ -50,22 +53,17 @@ public final class ChannelPlayer implements AutoCloseable {
 	private volatile long desiredSeekMs = -1L;
 	private volatile long reportedLengthMs;
 	private boolean startSeekApplied;
+	private volatile long lastSeekAt;
+	private volatile long suppressPlayUntil;
+	/** libVLC volume/mute is process-global; per-stream silence uses track disable instead. */
+	private int savedAudioTrack = -1;
+	private boolean audioOutputDisabled;
 
-	public ChannelPlayer(String url) {
-		this(url, false, 0L, false);
-	}
-
-	public ChannelPlayer(String url, boolean onDemand, long startPositionMs) {
-		this(url, onDemand, startPositionMs, false);
-	}
-
-	public ChannelPlayer(String url, boolean onDemand, long startPositionMs, boolean hdrToneMap) {
-		this.url = url;
+	public ChannelPlayer(String url, boolean onDemand, long startPositionMs, ToneMapMode toneMapMode) {
+		this.url = ClientMediaProxy.resolve(url);
 		this.onDemand = onDemand;
 		this.initialStartMs = Math.max(0L, startPositionMs);
-		if (hdrToneMap) {
-			this.videoTexture.forceHdrToneMap();
-		}
+		this.videoTexture.setToneMapMode(toneMapMode);
 		if (!VlcRuntime.isAvailable()) {
 			this.status = PlaybackStatus.UNAVAILABLE;
 			this.errorDetail = VlcRuntime.unavailableReason();
@@ -143,10 +141,11 @@ public final class ChannelPlayer implements AutoCloseable {
 
 	public void requestSeek(long positionMs) {
 		this.desiredSeekMs = Math.max(0L, positionMs);
+		this.lastSeekAt = System.currentTimeMillis();
 	}
 
 	public void setSubtitleUrl(@Nullable String url) {
-		this.subtitleOverlay.setSourceUrl(url);
+		this.subtitleOverlay.setSourceUrl(url == null || url.isBlank() ? "" : ClientMediaProxy.resolve(url));
 	}
 
 	public boolean consumeEnded() {
@@ -201,7 +200,11 @@ public final class ChannelPlayer implements AutoCloseable {
 
 	private void applyTransport() {
 		EmbeddedMediaPlayer current = this.player;
-		if (current == null || this.status == PlaybackStatus.ENDED) {
+		if (current == null) {
+			return;
+		}
+		if (this.status == PlaybackStatus.ENDED) {
+			this.stopPlayback(current);
 			return;
 		}
 		try {
@@ -209,24 +212,93 @@ public final class ChannelPlayer implements AutoCloseable {
 				current.controls().setTime(this.initialStartMs);
 				this.startSeekApplied = true;
 				this.desiredSeekMs = -1L;
+				this.lastSeekAt = System.currentTimeMillis();
 			}
 			long seek = this.desiredSeekMs;
 			if (seek >= 0L) {
 				long actual = current.status().time();
 				if (Math.abs(actual - seek) > SEEK_TOLERANCE_MS) {
 					current.controls().setTime(seek);
+					this.lastSeekAt = System.currentTimeMillis();
 				}
 				this.desiredSeekMs = -1L;
 			}
 			boolean playing = current.status().isPlaying();
 			if (this.desiredPaused && playing) {
 				current.controls().pause();
-			} else if (!this.desiredPaused && !playing && this.status != PlaybackStatus.ENDED && this.status != PlaybackStatus.ERROR) {
+			} else if (!this.desiredPaused && !playing && this.status != PlaybackStatus.ERROR) {
+				if (System.currentTimeMillis() < this.suppressPlayUntil) {
+					return;
+				}
 				current.controls().play();
 			}
 		} catch (Throwable t) {
 			PixelReel.LOGGER.debug("Could not apply transport for {}: {}", ChannelService.hostOnly(this.url), t.toString());
 		}
+	}
+
+	private void stopPlayback(@Nullable EmbeddedMediaPlayer current) {
+		if (current == null) {
+			return;
+		}
+		try {
+			if (current.status().isPlaying()) {
+				current.controls().stop();
+			}
+		} catch (Throwable t) {
+			PixelReel.LOGGER.debug("Could not stop ended stream {}: {}", ChannelService.hostOnly(this.url), t.toString());
+		}
+	}
+
+	/**
+	 * True when VLC really reached the end of a title. Opening, seeking, and dead transcode URLs all fire
+	 * `finished` too, and those must not restart the stream or tell the server the movie is over.
+	 */
+	boolean looksGenuinelyEnded() {
+		if (!this.onDemand || this.status != PlaybackStatus.ENDED) {
+			return false;
+		}
+		if (!this.firstFrameSeen.get()) {
+			return false;
+		}
+		long length = this.mediaLengthMs();
+		long time = this.mediaTimeMs();
+		if (length > END_NEAR_MS) {
+			return time + END_NEAR_MS >= length;
+		}
+		return time >= 5_000L;
+	}
+
+	private void onNativeFinished() {
+		this.errorDetail = "stream ended";
+		if (!this.onDemand) {
+			this.streamEnded.set(true);
+			return;
+		}
+		if (!this.firstFrameSeen.get() || System.currentTimeMillis() - this.lastSeekAt < END_IGNORE_AFTER_SEEK_MS) {
+			this.suppressPlayUntil = System.currentTimeMillis() + END_IGNORE_AFTER_SEEK_MS;
+			PixelReel.LOGGER.debug("Ignoring premature VLC finished for {}", ChannelService.hostOnly(this.url));
+			return;
+		}
+		long length = this.mediaLengthMs();
+		long time = this.mediaTimeMs();
+		if (length > END_NEAR_MS && time + END_NEAR_MS < length) {
+			this.suppressPlayUntil = System.currentTimeMillis() + END_IGNORE_AFTER_SEEK_MS;
+			PixelReel.LOGGER.debug(
+				"Ignoring VLC finished for {} at {}ms / {}ms",
+				ChannelService.hostOnly(this.url),
+				time,
+				length
+			);
+			return;
+		}
+		if (length <= 0L && time < 5_000L) {
+			this.suppressPlayUntil = System.currentTimeMillis() + END_IGNORE_AFTER_SEEK_MS;
+			PixelReel.LOGGER.debug("Ignoring VLC finished for {} with no duration", ChannelService.hostOnly(this.url));
+			return;
+		}
+		this.streamEnded.set(true);
+		this.status = PlaybackStatus.ENDED;
 	}
 
 	public void retry() {
@@ -237,6 +309,14 @@ public final class ChannelPlayer implements AutoCloseable {
 	}
 
 	public void tickAudio(float linearGain) {
+		this.tickAudio(linearGain, false);
+	}
+
+	/**
+	 * @param keepTrackWarm when muted, leave the audio track selected and hold volume at 0 so
+	 *                      entering a zone can unmute instantly (libVLC track re-select is slow).
+	 */
+	public void tickAudio(float linearGain, boolean keepTrackWarm) {
 		this.desiredGain = Math.clamp(linearGain, 0.0F, 1.0F);
 		EmbeddedMediaPlayer current = this.player;
 		if (current == null || this.closed) {
@@ -245,28 +325,85 @@ public final class ChannelPlayer implements AutoCloseable {
 
 		long now = System.currentTimeMillis();
 		boolean dirty = this.volumeDirty.getAndSet(false);
-		if (!dirty
-			&& now - this.lastVolumeUpdateAt < VOLUME_UPDATE_INTERVAL_MS
-			&& this.lastAppliedVolume != Integer.MIN_VALUE) {
+		boolean wantAudio = this.desiredGain > 0.001F;
+		if (!wantAudio) {
+			if (keepTrackWarm) {
+				if (!dirty && !this.audioOutputDisabled && this.lastAppliedVolume == 0
+					&& now - this.lastVolumeUpdateAt < VOLUME_UPDATE_INTERVAL_MS) {
+					return;
+				}
+				this.lastVolumeUpdateAt = now;
+				this.lastAppliedVolume = 0;
+				try {
+					this.enableAudioOutput(current);
+					current.audio().setVolume(0);
+				} catch (Throwable t) {
+					PixelReel.LOGGER.debug("Could not warm-mute VLC for {}: {}", ChannelService.hostOnly(this.url), t.toString());
+				}
+				return;
+			}
+			if (!dirty && this.audioOutputDisabled && now - this.lastVolumeUpdateAt < VOLUME_UPDATE_INTERVAL_MS) {
+				return;
+			}
+			this.lastVolumeUpdateAt = now;
+			this.lastAppliedVolume = 0;
+			this.disableAudioOutput(current);
 			return;
 		}
 
 		float master = Minecraft.getInstance().options.getSoundSourceVolume(SoundSource.MASTER);
 		float records = Minecraft.getInstance().options.getSoundSourceVolume(SoundSource.RECORDS);
 		int volume = (int)Math.round(Math.clamp(this.desiredGain * master * records, 0.0F, 2.0F) * 100.0);
+		boolean wasDisabled = this.audioOutputDisabled;
 		if (!dirty
+			&& !wasDisabled
 			&& this.lastAppliedVolume != Integer.MIN_VALUE
-			&& Math.abs(volume - this.lastAppliedVolume) < VOLUME_CHANGE_THRESHOLD) {
+			&& Math.abs(volume - this.lastAppliedVolume) < VOLUME_CHANGE_THRESHOLD
+			&& now - this.lastVolumeUpdateAt < VOLUME_UPDATE_INTERVAL_MS) {
 			return;
 		}
 
 		this.lastVolumeUpdateAt = now;
 		this.lastAppliedVolume = volume;
 		try {
-			current.audio().setMute(false);
+			this.enableAudioOutput(current);
+			// Never setMute — mute is process-global in libVLC and would silence every stream.
 			current.audio().setVolume(volume);
+			if (wasDisabled) {
+				// Track just came back; push volume once more next tick in case VLC ignored the first set.
+				this.volumeDirty.set(true);
+			}
 		} catch (Throwable t) {
 			PixelReel.LOGGER.debug("Could not set VLC volume for {}: {}", ChannelService.hostOnly(this.url), t.toString());
+		}
+	}
+
+	private void disableAudioOutput(EmbeddedMediaPlayer current) {
+		if (this.audioOutputDisabled) {
+			return;
+		}
+		try {
+			int track = current.audio().track();
+			if (track >= 0) {
+				this.savedAudioTrack = track;
+			}
+			current.audio().setTrack(-1);
+			this.audioOutputDisabled = true;
+		} catch (Throwable t) {
+			PixelReel.LOGGER.debug("Could not disable audio track for {}: {}", ChannelService.hostOnly(this.url), t.toString());
+		}
+	}
+
+	private void enableAudioOutput(EmbeddedMediaPlayer current) {
+		if (!this.audioOutputDisabled) {
+			return;
+		}
+		try {
+			int restore = this.savedAudioTrack >= 0 ? this.savedAudioTrack : 0;
+			current.audio().setTrack(restore);
+			this.audioOutputDisabled = false;
+		} catch (Throwable t) {
+			PixelReel.LOGGER.debug("Could not enable audio track for {}: {}", ChannelService.hostOnly(this.url), t.toString());
 		}
 	}
 
@@ -286,17 +423,13 @@ public final class ChannelPlayer implements AutoCloseable {
 		this.status = PlaybackStatus.CONNECTING;
 		this.lastAppliedVolume = Integer.MIN_VALUE;
 		this.volumeDirty.set(true);
+		this.audioOutputDisabled = false;
+		this.savedAudioTrack = -1;
 		this.startSeekApplied = this.initialStartMs <= 0L;
+		this.lastSeekAt = System.currentTimeMillis();
 		try {
 			int caching = Math.clamp(ConfigManager.get().streamCachingMillis, 0, 10000);
-			boolean started = current.media().play(
-				this.url,
-				":network-caching=" + caching,
-				":live-caching=" + caching,
-				":file-caching=" + caching,
-				":http-reconnect",
-				this.onDemand ? ":no-video-title-show" : ":live-caching=" + caching
-			);
+			boolean started = current.media().play(this.url, this.mediaOptions(caching));
 			if (!started) {
 				this.status = PlaybackStatus.ERROR;
 				this.errorDetail = "could not open stream";
@@ -307,6 +440,25 @@ public final class ChannelPlayer implements AutoCloseable {
 			this.errorDetail = String.valueOf(e.getMessage());
 			PixelReel.LOGGER.error("Failed to start channel playback ({})", ChannelService.hostOnly(this.url), e);
 		}
+	}
+
+	private String[] mediaOptions(int caching) {
+		if (this.onDemand) {
+			// Do not http-reconnect VOD: when a title ends, VLC would reopen the same URL from the start
+			// and loop it for that one client. Live channels still reconnect after a drop.
+			return new String[]{
+				":network-caching=" + caching,
+				":file-caching=" + caching,
+				":no-video-title-show",
+				":input-repeat=0"
+			};
+		}
+		return new String[]{
+			":network-caching=" + caching,
+			":live-caching=" + caching,
+			":file-caching=" + caching,
+			":http-reconnect"
+		};
 	}
 
 	private @Nullable EmbeddedMediaPlayer ensurePlayer() {
@@ -437,9 +589,14 @@ public final class ChannelPlayer implements AutoCloseable {
 			ChannelPlayer.this.volumeDirty.set(true);
 		}
 
-		@Override
+	@Override
 		public void playing(MediaPlayer mediaPlayer) {
 			ChannelPlayer.this.volumeDirty.set(true);
+			// New media may re-select an audio track; re-apply silence if this room is muted.
+			if (ChannelPlayer.this.desiredGain <= 0.001F && ChannelPlayer.this.player != null) {
+				ChannelPlayer.this.audioOutputDisabled = false;
+				ChannelPlayer.this.disableAudioOutput(ChannelPlayer.this.player);
+			}
 		}
 
 		@Override
@@ -454,11 +611,7 @@ public final class ChannelPlayer implements AutoCloseable {
 
 		@Override
 		public void finished(MediaPlayer mediaPlayer) {
-			ChannelPlayer.this.errorDetail = "stream ended";
-			ChannelPlayer.this.streamEnded.set(true);
-			if (ChannelPlayer.this.onDemand) {
-				ChannelPlayer.this.status = PlaybackStatus.ENDED;
-			}
+			ChannelPlayer.this.onNativeFinished();
 		}
 
 		@Override

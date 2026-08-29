@@ -39,6 +39,8 @@ public final class PlexService {
 	private volatile Map<String, JellyfinItemSummary> itemsById = Map.of();
 	private volatile long cacheFilledAtMillis;
 	private @Nullable CompletableFuture<JellyfinStatus> inFlight;
+	private volatile @Nullable java.net.http.HttpClient sharedHttp;
+	private volatile String sharedHttpKey = "";
 
 	private PlexService() {
 	}
@@ -106,7 +108,22 @@ public final class PlexService {
 		return Optional.ofNullable(this.itemsById.get(itemId));
 	}
 
+	public String imageUrl(String itemId) {
+		if (itemId == null || itemId.isBlank()) {
+			return "";
+		}
+		PixelReelConfig config = ConfigManager.get();
+		if (!config.isPlexConfigured()) {
+			return "";
+		}
+		return this.client(config).imageUrl("/library/metadata/" + itemId + "/thumb");
+	}
+
 	public CompletableFuture<Optional<JellyfinItemSummary>> fetchItem(String itemId) {
+		Optional<JellyfinItemSummary> cached = this.find(itemId);
+		if (cached.isPresent()) {
+			return CompletableFuture.completedFuture(cached);
+		}
 		return CompletableFuture.supplyAsync(() -> {
 			try {
 				PixelReelConfig config = ConfigManager.get();
@@ -394,7 +411,18 @@ public final class PlexService {
 	}
 
 	private PlexClient client(PixelReelConfig config) {
-		return new PlexClient(PlexClient.createHttpClient(config, this.executor), config);
+		String key = config.plexUrl + "\0" + config.plexToken + "\0" + config.networkTimeoutSeconds;
+		java.net.http.HttpClient http = this.sharedHttp;
+		if (http == null || !key.equals(this.sharedHttpKey)) {
+			synchronized (this) {
+				if (this.sharedHttp == null || !key.equals(this.sharedHttpKey)) {
+					this.sharedHttp = PlexClient.createHttpClient(config, this.executor);
+					this.sharedHttpKey = key;
+				}
+				http = this.sharedHttp;
+			}
+		}
+		return new PlexClient(http, config);
 	}
 
 	private static boolean isUrlValid(String url) {

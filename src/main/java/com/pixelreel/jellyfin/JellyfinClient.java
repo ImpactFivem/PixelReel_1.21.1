@@ -362,12 +362,9 @@ public final class JellyfinClient {
 	}
 
 	private static boolean mediaSourceLooksHdr(JsonObject source) {
-		if ("hdr".equalsIgnoreCase(text(source, "VideoRange"))
-			|| text(source, "VideoRangeType").toLowerCase(Locale.ROOT).contains("hdr")
-			|| text(source, "VideoRangeType").toLowerCase(Locale.ROOT).contains("dovi")
-			|| text(source, "VideoRangeType").toLowerCase(Locale.ROOT).contains("dolby")
-			|| text(source, "VideoRangeType").toLowerCase(Locale.ROOT).contains("hlg")) {
-			return true;
+		Boolean fromSource = classifyVideoRange(text(source, "VideoRange") + " " + text(source, "VideoRangeType"));
+		if (fromSource != null) {
+			return fromSource;
 		}
 		if (!source.has("MediaStreams") || !source.get("MediaStreams").isJsonArray()) {
 			return false;
@@ -380,18 +377,37 @@ public final class JellyfinClient {
 			if (!"Video".equalsIgnoreCase(text(stream, "Type"))) {
 				continue;
 			}
-			String range = text(stream, "VideoRange");
-			String rangeType = text(stream, "VideoRangeType");
-			String combined = (range + " " + rangeType).toLowerCase(Locale.ROOT);
-			if (combined.contains("hdr") || combined.contains("dovi") || combined.contains("dolby") || combined.contains("hlg")) {
-				return true;
+			Boolean fromStream = classifyVideoRange(text(stream, "VideoRange") + " " + text(stream, "VideoRangeType"));
+			if (fromStream != null) {
+				return fromStream;
 			}
-			String codec = text(stream, "VideoCodecTag") + " " + text(stream, "Profile");
-			if (codec.toLowerCase(Locale.ROOT).contains("dolby") || codec.toLowerCase(Locale.ROOT).contains("dvhe")) {
+			String codec = (text(stream, "VideoCodecTag") + " " + text(stream, "Profile")).toLowerCase(Locale.ROOT);
+			if (codec.contains("dolby") || codec.contains("dvhe") || codec.contains("dvh1")) {
 				return true;
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * Reads a Jellyfin/Emby VideoRange(Type) pair, returning null when it says nothing useful.
+	 *
+	 * <p>Dolby Vision needs care: profiles carrying an HDR10 or HLG base layer decode as PQ and want tone mapping,
+	 * but the SDR-compatible profile (reported as {@code DOVIWithSDR}) already decodes at normal brightness and
+	 * would be blown out by it.
+	 */
+	private static @Nullable Boolean classifyVideoRange(String raw) {
+		String value = raw.toLowerCase(Locale.ROOT);
+		if (value.isBlank()) {
+			return null;
+		}
+		if (value.contains("doviwithsdr")) {
+			return false;
+		}
+		if (value.contains("hdr") || value.contains("dovi") || value.contains("dolby") || value.contains("hlg")) {
+			return true;
+		}
+		return value.contains("sdr") ? Boolean.FALSE : null;
 	}
 
 	public void reportPlaying(String itemId, String mediaSourceId, String playSessionId, long positionTicks, boolean paused) {

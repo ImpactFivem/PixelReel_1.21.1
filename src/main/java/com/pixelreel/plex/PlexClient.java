@@ -501,11 +501,21 @@ public final class PlexClient {
 		if (body == null || body.isBlank()) {
 			return new JsonObject();
 		}
-		JsonElement element = JsonParser.parseString(body);
-		if (!element.isJsonObject()) {
-			throw new IOException("Expected JSON object from Plex");
+		String trimmed = body.stripLeading();
+		if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+			String preview = trimmed.length() > 80 ? trimmed.substring(0, 80) + "…" : trimmed;
+			throw new IOException("Plex returned non-JSON at " + path + " (check URL/token): " + preview.replace('\n', ' '));
 		}
-		return element.getAsJsonObject();
+		try {
+			JsonElement element = JsonParser.parseString(body);
+			if (!element.isJsonObject()) {
+				throw new IOException("Expected JSON object from Plex");
+			}
+			return element.getAsJsonObject();
+		} catch (com.google.gson.JsonSyntaxException e) {
+			String preview = trimmed.length() > 80 ? trimmed.substring(0, 80) + "…" : trimmed;
+			throw new IOException("Plex returned malformed JSON at " + path + ": " + preview.replace('\n', ' '), e);
+		}
 	}
 
 	private HttpRequest.Builder request(String path) {
